@@ -1,0 +1,60 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+ehthumbs.db
+Desktop.ini
+
+# Cache / large data
+src/cache/
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.pt
+*.pth
+*.ckpt
+
+# Experiment outputs
+src/experiment_report.json
+src/final_report.json
+src/test_env.py
+src/test_env2.py
+src/test_full.py
+src/test_full2.py
+src/test_voxposer_full.py
+src/update_notebook_env.py
+src/envs/rlbench_env_new_custom.py
+src/playground.ipynb
+
+# Logs
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# CoppeliaSim / PyRep
+*.ttm
+*.ttt

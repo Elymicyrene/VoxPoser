@@ -43,6 +43,24 @@ class Controller:
         contact_position = control[:3]  # [3]
         pushing_dir = control[3:6]  # [3]
         pushing_dist = control[6]  # [1]
+
+        # Fix: sanity check contact_position — reject positions far outside workspace
+        # (prevents MPC bugs from teleporting EE to coordinates like [443, -1098, -72639])
+        try:
+            _ws_min = self.env.workspace_bounds_min
+            _ws_max = self.env.workspace_bounds_max
+            _ws_center = (_ws_min + _ws_max) / 2.0
+            _ws_range = _ws_max - _ws_min
+            _limit = max(_ws_range) * 3.0
+            _dist = np.linalg.norm(contact_position - _ws_center)
+            if _dist > _limit:
+                print(f'[controllers.py] _apply_mpc_control: contact_position {contact_position.round(3)} is {_dist:.1f}m from workspace center (limit={_limit:.1f}m). CLAMPING to workspace.')
+                contact_position = np.clip(contact_position, _ws_min - 0.05, _ws_max + 0.05)
+                control = control.copy()
+                control[:3] = contact_position
+        except Exception:
+            pass
+
         # calculate a safe end effector rotation
         ee_quat = self._calculate_ee_rot(pushing_dir)
         # calculate translation
@@ -56,14 +74,13 @@ class Controller:
         # move to start pose
         self.env.move_to_pose(np.concatenate([t_start, ee_quat]), speed=target_velocity)
         print('[controllers.py] moved to start pose', end='; ')
-        # move to interact pose
+        # move to interact pose — STAY HERE, don't retract!
+        # Critical fix: For PushButton/LampOff/Slide tasks, retracting EE breaks
+        # contact immediately, allowing springs (button) or momentum to undo the
+        # push. Remaining at interact pose lets downstream handlers
+        # (press_down_continuous / hold_press) sustain compression.
         self.env.move_to_pose(np.concatenate([t_interact, ee_quat]), speed=target_velocity * 0.2)
-        print('[controllers.py] moved to final pose', end='; ')
-        # back to rest pose
-        self.env.move_to_pose(np.concatenate([t_rest, ee_quat]), speed=target_velocity * 0.33)
-        print('[controllers.py] back to release pose', end='; ')
-        self.env.reset_to_default_pose()
-        print('[controllers.py] back togenerate_random_control default pose', end='')
+        print('[controllers.py] moved to final pose (staying; no rest-pose retraction)', end='; ')
         print()
 
     def execute(self, movable_obs, waypoint):
@@ -167,8 +184,8 @@ class Controller:
         # sample pushing_dir
         pushing_dirs = target - contact_positions  # [B, 3]
         pushing_dirs = normalize_vector(pushing_dirs)
-        # sample pushing_dist
-        pushing_dist = np.random.uniform(-0.02, 0.09, size=(num_samples, 1))  # [B, 1]
+        # sample pushing_dist - 增加推动距离以覆盖较大位移
+        pushing_dist = np.random.uniform(0.00, 0.25, size=(num_samples, 1))  # [B, 1]
         # assemble control sequences
         controls = np.concatenate([contact_positions, pushing_dirs, pushing_dist], axis=1)  # [B, 7]
         return controls

@@ -116,18 +116,36 @@ class DynamicObservation:
     
     def __get__(self, key):
         evaluated = self.func()
+        if evaluated is None:
+            raise RuntimeError(f"DynamicObservation evaluation returned None; cannot access key '{key}'. "
+                               f"Most likely parse_query_obj / detect returned no value (LLM code incomplete).")
+        if not hasattr(evaluated, '__getitem__'):
+            raise RuntimeError(f"DynamicObservation evaluation returned {type(evaluated)}, not subscriptable; key='{key}'")
         if isinstance(evaluated[key], np.ndarray):
             return evaluated[key].copy()
         return evaluated[key]
-    
+
     def __getattr__(self, key):
-        return self.__get__(key)
-    
+        if key.startswith('__') and key.endswith('__'):
+            raise AttributeError(key)
+        try:
+            return self.__get__(key)
+        except Exception:
+            # Safe fallback for attribute access that LLM generated (e.g. button.color
+            # when color isn't in the underlying obs_dict). Return None so the caller
+            # can branch on it instead of aborting the whole composer pipeline.
+            return None
+
     def __getitem__(self, key):
-        return self.__get__(key)
+        try:
+            return self.__get__(key)
+        except Exception:
+            return None
 
     def __call__(self):
         static_obs = self.func()
+        if static_obs is None:
+            raise RuntimeError("DynamicObservation evaluation returned None; cannot materialize.")
         if not isinstance(static_obs, Observation):
             static_obs = Observation(static_obs)
         return static_obs
@@ -138,10 +156,18 @@ class Observation(dict):
         self.obs_dict = obs_dict
     
     def __getattr__(self, key):
-        return self.obs_dict[key]
+        try:
+            return self.obs_dict[key]
+        except KeyError:
+            # Safe fallback for attribute access that LLM generated (e.g. button.color
+            # when the underlying scene object doesn't expose a 'color' field).
+            return None
     
     def __getitem__(self, key):
-        return self.obs_dict[key]
+        try:
+            return self.obs_dict[key]
+        except KeyError:
+            return None
 
     def __getstate__(self):
         return self.obs_dict

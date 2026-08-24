@@ -92,7 +92,6 @@ composer("back to default pose")
 
 objects = ['lamp', 'switch']
 # Query: Turn off the lamp.
-composer("close the gripper")
 composer("move to the center of the switch")
 composer("back to default pose")
 # done
@@ -104,11 +103,18 @@ composer("turn clockwise by 180 degrees")
 composer("back to default pose")
 # done
 
+objects = ['meat', 'grill']
+# Query: take the meat off the grill.
+composer("grasp the meat")
+composer("move 20cm above the grill")
+composer("open gripper")
+composer("back to default pose")
+# done
+
 objects = ['steak', 'grill', 'plate']
 # Query: Take the steak out of the grill and put it flat on the plate.
 composer("grasp the steak")
-composer("back to default pose")
-composer("rotate the gripper to be 45 degrees slanted relative to the plate")
+composer("move 20cm above the grill")
 composer("move to 10cm on top of the plate")
 composer("open gripper")
 composer("back to default pose")
