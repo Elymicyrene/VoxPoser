@@ -7,5 +7,7 @@
     "meat_off_grill": [["grill", "grill"], ["meat", "chicken"]],
     "slide_block_to_target": [["block", "block"], ["target", "target"]],
     "take_lid_off_saucepan": [["saucepan", "saucepan"], ["saucepan_lid", "saucepan_lid"]],
-    "take_umbrella_out_of_umbrella_stand": [["umbrella", "umbrella"], ["stand", "stand"]]
+    "take_umbrella_out_of_umbrella_stand": [["umbrella", "umbrella"], ["stand", "stand"]],
+    "press_switch": [["switch", "joint"]],
+    "stack_cups": [["cup1", "cup1"], ["cup2", "cup2"], ["cup3", "cup3"]]
 }
