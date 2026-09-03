@@ -9,5 +9,13 @@
     "take_lid_off_saucepan": [["saucepan", "saucepan"], ["saucepan_lid", "saucepan_lid"]],
     "take_umbrella_out_of_umbrella_stand": [["umbrella", "umbrella"], ["stand", "stand"]],
     "press_switch": [["switch", "joint"]],
-    "stack_cups": [["cup1", "cup1"], ["cup2", "cup2"], ["cup3", "cup3"]]
+    "stack_cups": [["cup1", "cup1"], ["cup2", "cup2"], ["cup3", "cup3"]],
+    "place_cups": [["cup1", "mug0"], ["cup2", "mug1"], ["cup3", "mug2"]],
+    "block_pyramid": [["block0", "block_pyramid_block0"], ["block1", "block_pyramid_block1"], ["block2", "block_pyramid_block2"], ["block3", "block_pyramid_block3"], ["block4", "block_pyramid_block4"], ["block5", "block_pyramid_block5"]],
+    "place_shape_in_shape_sorter": [["cube", "cube"], ["cylinder", "cylinder"], ["triangular prism", "triangular_prism"], ["star", "star"], ["moon", "moon"]],
+    "put_knife_in_knife_block": [["knife", "knife"]],
+    "pick_and_lift": [["block", "pick_and_lift_target"]],
+    "reach_target": [["target", "target"]],
+    "empty_container": [["container", "large_container"]],
+    "stack_blocks": [["block0", "stack_blocks_target0"], ["block1", "stack_blocks_target1"], ["block2", "stack_blocks_target2"], ["block3", "stack_blocks_target3"]]
 }
