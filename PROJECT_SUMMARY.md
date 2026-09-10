@@ -70,22 +70,23 @@ VoxPoser（Huang et al., 2023）是一种利用大语言模型（LLM）与视觉
 
 ## 三、实验结果
 
-最新一轮综合 benchmark 结果（2026-09-03）：
+最新一轮综合 benchmark 结果（2026-09-10，DeepSeek API 正常，planner 端到端运行）：
 
 | 测试集 | 通过 / 总数 | 成功率 |
 |---|---|---|
 | Smoke6 回归 | 6 / 6 | 100% |
-| 扩展任务 | 13 / 16 | 81.3% |
-| **总体** | **19 / 22** | **86.4%** |
+| 扩展任务 | 12 / 16 | 75.0% |
+| **总体** | **18 / 22** | **81.8%** |
+
+**关键变化：** 本轮所有通过任务的 `planner_success` 均为 **True**，即 LLM 规划器实际完成了指令分解、价值图生成、轨迹规划与执行，而非仅环境层面的 success 判定。
 
 **未通过任务：**
 
 | 任务 | 失败原因 |
 |---|---|
-| PressSwitch (var0, var1) | `reset` 阶段 5 次重试均失败，V-REP 返回 -1（关节操作在 headless 下不稳定） |
+| PressSwitch (var0, var1) | `reset` 阶段 5 次重试均失败，V-REP 返回 -1（关节/IK 校验在 headless 下不稳定） |
+| PutRubbishInBin (var0) | 规划器执行超过 500s 超时（长时序多步任务） |
 | PutKnifeInKnifeBlock (var0) | `load_task + first_reset` 在 150s 内未完成（IK 可行性校验阶段挂起） |
-
-**说明：** 本轮测试中 DeepSeek API 账户余额不足（402 Insufficient Balance），因此 `planner_success` 均为 False。`env_success=True` 来自增强后的 `success()` 判定逻辑（环境层面的成功条件已满足）。后续 API 余额恢复后可重新运行以获得完整的 planner 成功率。
 
 ---
 
@@ -120,11 +121,11 @@ VoxPoser（Huang et al., 2023）是一种利用大语言模型（LLM）与视觉
    - 深入排查 V-REP -1 错误的具体调用点，可能需要在 safe_init_episode 中完全跳过关节重置或改用 `set_joint_position` 的 disable_dynamics 模式。
    - 尝试在 init_episode 前先 `pyrep.step()` 若干步让物理稳定。
 
-2. **恢复 planner 端到端评测**：
-   - DeepSeek API 余额恢复后，重新运行 benchmark，获取真实的 `planner_success` 成功率，区分"环境层面可达"与"规划器实际可达"。
+2. **优化 PutRubbishInBin 长时序任务**：
+   - 当前 500s 超时，可考虑增加 planner timeout 或优化 prompt 减少不必要的子任务分解。
 
 3. **增加更多任务**：
-   - 将测试覆盖从 22 个任务扩展到 30+，优先选择 headless 下稳定的任务（如 PickAndLift、ReachTarget 类简单任务）。
+   - 将测试覆盖从 22 个任务扩展到 30+，优先选择 headless 下稳定的任务。
 
 ### 5.2 中期改进（1-2 月）
 

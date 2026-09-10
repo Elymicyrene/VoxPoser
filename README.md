@@ -77,10 +77,42 @@ Results are written to `ep_jsons_full/comprehensive_report_<timestamp>.json`.
 | Suite | Pass / Total | Rate |
 |---|---|---|
 | Smoke6 Regression | 6 / 6 | 100% |
-| Extended Tasks | 13 / 16 | 81.3% |
-| **Overall** | **19 / 22** | **86.4%** |
+| Extended Tasks | 12 / 16 | 75.0% |
+| **Overall** | **18 / 22** | **81.8%** |
 
-Failing tasks: `PressSwitch` (2 vars) and `PutKnifeInKnifeBlock` — both fail at task-reset / IK-validation in headless mode (V-REP return value -1), not at the planner level.
+> All passing tasks also report `planner_success=True` — the LLM planner ran end-to-end and executed the generated trajectory successfully (previous runs had `planner_success=False` due to API balance issues).
+
+**Per-task breakdown:**
+
+| Task | Var | Env | Planner | Time |
+|---|---|---|---|---|
+| PushButton | 0 | ✅ | ✅ | 82s |
+| PushButton | 1 | ✅ | ✅ | 65s |
+| LampOff | 0 | ✅ | ✅ | 69s |
+| LampOff | 1 | ✅ | ✅ | 79s |
+| SlideBlockToTarget | 0 | ✅ | ✅ | 63s |
+| MeatOffGrill | 0 | ✅ | ✅ | 100s |
+| PressSwitch | 0 | ❌ | — | 24s |
+| PressSwitch | 1 | ❌ | — | 23s |
+| StackCups | 0 | ✅ | ✅ | 149s |
+| StackCups | 1 | ✅ | ✅ | 145s |
+| StackCups | 2 | ✅ | ✅ | 150s |
+| PutRubbishInBin | 0 | ❌ | — | 496s (timeout) |
+| TakeLidOffSaucepan | 0 | ✅ | ✅ | 373s |
+| TakeUmbrellaOutOfUmbrellaStand | 0 | ✅ | ✅ | 104s |
+| PlaceCups | 0 | ✅ | ✅ | 453s |
+| PlaceShapeInShapeSorter | 0 | ✅ | ✅ | 360s |
+| PutKnifeInKnifeBlock | 0 | ❌ | — | 180s (timeout) |
+| PickAndLift | 0 | ✅ | ✅ | 213s |
+| ReachTarget | 0 | ✅ | ✅ | 103s |
+| StackBlocks | 0 | ✅ | ✅ | 98s |
+| EmptyContainer | 0 | ✅ | ✅ | 213s |
+| BlockPyramid | 0 | ✅ | ✅ | 138s |
+
+**Failing tasks & root causes:**
+- `PressSwitch` (×2): task `reset()` fails — V-REP returns -1 during joint/IK validation in headless mode.
+- `PutRubbishInBin`: hits the 500s planner timeout (long-horizon multi-step task).
+- `PutKnifeInKnifeBlock`: `load_task + first_reset` times out at 150s (IK-validation hang in headless mode).
 
 ---
 
