@@ -1,4 +1,4 @@
-import os
+﻿import os
 import openai
 openai.base_url = "https://api.deepseek.com"
 from time import sleep
@@ -18,7 +18,7 @@ import time
 from LLM_cache import DiskCache
 
 client = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", "sk-85d665c929be4149aa03187fedd1a400"),
+    api_key=os.environ.get("OPENAI_API_KEY", "璇疯緭鍏ユ偍鑷繁鐨凞eepSeek-API-Key(sk-...)  Set OPENAI_API_KEY env var"),
     base_url="https://api.deepseek.com"
 )
 

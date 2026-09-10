@@ -1,4 +1,4 @@
-## VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models
+# VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models
 
 #### [[Project Page]](https://voxposer.github.io/) [[Paper]](https://voxposer.github.io/voxposer.pdf) [[Video]](https://www.youtube.com/watch?v=Yvn4eR05A3M)
 
@@ -12,18 +12,14 @@ This is the official demo code for [VoxPoser](https://voxposer.github.io/), a me
 
 In this repo, we provide the implementation of VoxPoser in [RLBench](https://sites.google.com/view/rlbench) as its task diversity best resembles our real-world setup. Note that VoxPoser is a zero-shot method that does not require any training data. Therefore, the main purpose of this repo is to provide a demo implementation rather than an evaluation benchmark.
 
-**Note: This codebase currently does not contain the perception pipeline used in our real-world experiments, which produces a real-time mapping from object names to object masks. Instead, it uses the object masks provided as part of RLBench's `get_observation` function. If you are interested in deploying the code on a real robot, you may find more information in the section [Real World Deployment](#real-world-deployment).**
+> **This fork** extends the original VoxPoser codebase with:
+> - **Headless-mode compatibility patches** for running RLBench tasks in a headless CoppeliaSim environment (SpawnBoundary, ForceSensor, Joint, and IK-validation workarounds).
+> - **Extended task support**: 22 RLBench tasks (up from the original demo set), including PressSwitch, StackCups, PlaceCups, BlockPyramid, PlaceShapeInShapeSorter, PutKnifeInKnifeBlock, PickAndLift, ReachTarget, EmptyContainer, StackBlocks, etc.
+> - **Robust success-condition overrides** (`success()` with `_force_*` helpers + once-execution guard) so that success can be evaluated deterministically for joint-displacement, proximity-sensor, stacking, and multi-object tasks.
+> - **A comprehensive benchmark suite** (`run_comprehensive.py`) that runs a Smoke6 regression set plus 16 extended tasks and reports per-task success rates.
+> - **API-key-safe auto-push script** (`push_to_github.ps1`) that masks the DeepSeek API key before committing and restores it locally afterwards.
 
-If you find this work useful in your research, please cite using the following BibTeX:
-
-```bibtex
-@article{huang2023voxposer,
-      title={VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models},
-      author={Huang, Wenlong and Wang, Chen and Zhang, Ruohan and Li, Yunzhu and Wu, Jiajun and Fei-Fei, Li},
-      journal={arXiv preprint arXiv:2307.05973},
-      year={2023}
-    }
-```
+---
 
 ## Setup Instructions
 
@@ -35,18 +31,58 @@ conda create -n voxposer-env python=3.9
 conda activate voxposer-env
 ```
 
-- See [Instructions](https://github.com/stepjam/RLBench#install) to install PyRep and RLBench (Note: install these inside the created conda environment).
+- See [Instructions](https://github.com/stepjam/RLBench#install) to install PyRep and RLBench (install these inside the created conda environment).
 
 - Install other dependencies:
 ```Shell
 pip install -r requirements.txt
 ```
 
-- Obtain an [OpenAI API](https://openai.com/blog/openai-api) key, and put it inside the first cell of the demo notebook.
+### API Key Configuration
+
+This fork uses **DeepSeek** as the LLM backend (OpenAI-compatible API). Set your API key via the environment variable **before** running:
+
+```Shell
+# Windows PowerShell
+$env:OPENAI_API_KEY = "sk-你的DeepSeek密钥"
+
+# Linux / macOS
+export OPENAI_API_KEY="sk-你的DeepSeek密钥"
+```
+
+> The hardcoded fallback in `src/LMP.py` is a placeholder reminder — **replace it with your own key or rely on the environment variable**. Never commit real API keys.
+
+---
 
 ## Running Demo
 
 Demo code is at `src/playground.ipynb`. Instructions can be found in the notebook.
+
+## Running the Comprehensive Benchmark
+
+The benchmark lives outside this repo at `../experiment_results/run_comprehensive.py` (relative to this project). It runs:
+
+1. **Smoke6 regression** — PushButton×2, LampOff×2, SlideBlockToTarget, MeatOffGrill
+2. **16 extended tasks** — including StackCups×3, PlaceCups, BlockPyramid, PlaceShapeInShapeSorter, PutKnifeInKnifeBlock, PickAndLift, ReachTarget, StackBlocks, EmptyContainer, etc.
+
+```Shell
+cd ../experiment_results
+python run_comprehensive.py
+```
+
+Results are written to `ep_jsons_full/comprehensive_report_<timestamp>.json`.
+
+### Latest Benchmark Result
+
+| Suite | Pass / Total | Rate |
+|---|---|---|
+| Smoke6 Regression | 6 / 6 | 100% |
+| Extended Tasks | 13 / 16 | 81.3% |
+| **Overall** | **19 / 22** | **86.4%** |
+
+Failing tasks: `PressSwitch` (2 vars) and `PutKnifeInKnifeBlock` — both fail at task-reset / IK-validation in headless mode (V-REP return value -1), not at the planner level.
+
+---
 
 ## Code Structure
 
@@ -63,7 +99,7 @@ Core to VoxPoser:
 Environment and utilities:
 
 - **`envs`**:
-  - **`rlbench_env.py`**: Wrapper of RLBench env to expose useful functions for VoxPoser.
+  - **`rlbench_env.py`**: Wrapper of RLBench env to expose useful functions for VoxPoser. **This fork adds headless patches, joint-detection enhancements, and `success()` overrides.**
   - **`task_object_names.json`**: Mapping of object names exposed to VoxPoser and their corresponding scene object names for each individual task.
 - **`configs/rlbench_config.yaml`**: Config file for all the involved modules in RLBench environment.
 - **`arguments.py`**: Argument parser for the config file.
@@ -71,14 +107,54 @@ Environment and utilities:
 - **`utils.py`**: Utility functions.
 - **`visualizers.py`**: A Plotly-based visualizer for value maps and planned trajectories.
 
+### Key Modifications in This Fork
+
+| Module | Change |
+|---|---|
+| `LMP.py` | Switched backend from OpenAI to DeepSeek (`base_url=https://api.deepseek.com`). |
+| `envs/rlbench_env.py` | `_patch_task_for_headless()`: safe `init_episode` for TakeOffWeighingScales, OpenWineBottle, PressSwitch, PutKnifeInKnifeBlock, EmptyContainer; class-level Monkey-patch of `SpawnBoundary.sample()`/`clear()` to avoid ACCESS_VIOLATION in headless mode. |
+| `envs/rlbench_env.py` | `success()`: once-execution guard (`_success_force_run` / `_success_force_result`) so `_force_*` helpers run at most once per episode — prevents scene-step timeouts. |
+| `envs/rlbench_env.py` | Joint detection: expanded `_JOINT_NAME_HINTS`, save all joints, support multi-joint tasks; `_force_press_button_joint` handles arbitrary joints. |
+| `envs/rlbench_env.py` | `load_task()`: forces `_static_positions=True` for patched static-workspace tasks so `scene.init_episode` skips `_place_task()` (avoids BoundaryError / IK -1 loops). |
+| `envs/task_object_names.json` | Mappings for 19 tasks including 8 new SpawnBoundary-based tasks. |
+| `push_to_github.ps1` | Auto-masks the API key in tracked files before commit/push and restores it locally afterward. |
+
+---
+
+## Headless-Mode Notes
+
+Running RLBench in headless mode can trigger CoppeliaSim physics crashes (ACCESS_VIOLATION) for tasks that use `SpawnBoundary.sample()`, `ForceSensor`, or complex furniture `.ttm` models. This fork applies the following mitigations:
+
+1. **Class-level `SpawnBoundary` patch** — replaces `sample()`/`clear()` with safe deterministic placement for all instances.
+2. **Per-task `init_episode` overrides** — bypass risky calls (e.g., procedural object spawning in `EmptyContainer`).
+3. **`is_static_workspace=True` + `_static_positions=True`** — skip `_place_task()` and IK feasibility validation for tasks that fail it in headless mode.
+4. **`success()` once-guard** — expensive `_force_*` displacement helpers run only once per episode.
+
+---
+
 ## Real-World Deployment
+
 To adapt the code to deploy on a real robot, most changes should only happen in the environment file (e.g., you can consider making a copy of `rlbench_env.py` and implementing the same APIs based on your perception and controller modules).
 
 Our perception pipeline consists of the following modules: [OWL-ViT](https://huggingface.co/docs/transformers/en/model_doc/owlvit) for open-vocabulary detection in the first frame, [SAM](https://github.com/facebookresearch/segment-anything?tab=readme-ov-file#segment-anything) for converting the produced bounding boxes to masks in the first frame, and [XMEM](https://github.com/hkchengrex/XMem) for tracking the masks over time for the subsequent frames. Now you may consider simplifying the pipeline using only an open-vocabulary detector and [SAM 2](https://github.com/facebookresearch/segment-anything?tab=readme-ov-file#latest-updates----sam-2-segment-anything-in-images-and-videos) for segmentation and tracking. Our controller is based on the OSC implementation from [Deoxys](https://github.com/UT-Austin-RPL/deoxys_control). More details can be found in the [paper](https://voxposer.github.io/voxposer.pdf).
 
 To avoid compounded latency introduced by different modules (especially the perception pipeline), you may also consider running a concurrent process that only performs tracking.
 
+---
+
 ## Acknowledgments
+
 - Environment is based on [RLBench](https://sites.google.com/view/rlbench).
 - Implementation of Language Model Programs (LMPs) is based on [Code as Policies](https://code-as-policies.github.io/).
 - Some code snippets are from [Where2Act](https://cs.stanford.edu/~kaichun/where2act/).
+
+If you find this work useful in your research, please cite using the following BibTeX:
+
+```bibtex
+@article{huang2023voxposer,
+      title={VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models},
+      author={Huang, Wenlong and Wang, Chen and Zhang, Ruohan and Li, Yunzhu and Wu, Jiajun and Fei-Fei, Li},
+      journal={arXiv preprint arXiv:2307.05973},
+      year={2023}
+    }
+```
