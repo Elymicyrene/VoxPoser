@@ -55,6 +55,9 @@ src/playground.ipynb
 venv/
 env/
 
+# Local secrets (NEVER commit)
+.api_key
+
 # CoppeliaSim / PyRep
 *.ttm
 *.ttt

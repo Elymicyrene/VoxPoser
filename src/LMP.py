@@ -18,7 +18,7 @@ import time
 from LLM_cache import DiskCache
 
 client = openai.OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY", "璇疯緭鍏ユ偍鑷繁鐨凞eepSeek-API-Key(sk-...)  Set OPENAI_API_KEY env var"),
+    api_key=os.environ.get("OPENAI_API_KEY", "YOUR_DEEPSEEK_API_KEY_HERE  Set OPENAI_API_KEY env var"),
     base_url="https://api.deepseek.com"
 )
 

@@ -23,11 +23,20 @@ $gitArgs = @("-c", "http.proxy=", "-c", "https.proxy=")
 # Replace any hardcoded API keys in tracked files with a placeholder reminder
 # BEFORE staging, then RESTORE the real key locally AFTER pushing.
 # This prevents credential leakage to GitHub while keeping local use intact.
-$REAL_API_KEY = "sk-85d665c929be4149aa03187fedd1a400"
-$PLACEHOLDER = "请输入您自己的DeepSeek-API-Key(sk-...)  Set OPENAI_API_KEY env var"
+#
+# The real key is stored in the gitignored file ".api_key" (single line).
+# It is NEVER hardcoded in any tracked file.
 
-# Collect tracked files that contain the real key (only .py / .yaml / .json / .txt)
-$trackedFiles = git ls-files | Where-Object { $_ -match '\.(py|yaml|yml|json|txt|md)$' }
+$API_KEY_FILE = Join-Path $PSScriptRoot ".api_key"
+if (-not (Test-Path $API_KEY_FILE)) {
+    Write-Host "[ERROR] .api_key file not found! Create it with your real DeepSeek key (one line)." -ForegroundColor Red
+    exit 1
+}
+$REAL_API_KEY = (Get-Content -LiteralPath $API_KEY_FILE -Raw -Encoding UTF8).Trim()
+$PLACEHOLDER = "YOUR_DEEPSEEK_API_KEY_HERE  Set OPENAI_API_KEY env var"
+
+# Collect ALL tracked files that contain the real key
+$trackedFiles = git ls-files
 $modifiedFiles = @()
 foreach ($f in $trackedFiles) {
     if (Test-Path $f) {
