@@ -3730,9 +3730,15 @@ class VoxPoserRLBench():
                     # Returning True skips _place_task() → avoids IK feasibility
                     # validation that triggers "The call failed on the V-REP side. Return value: -1"
                     return True
+
+                def _ps_validate(self_inner):
+                    # Skip waypoint generation (which calls IK and can return V-REP -1
+                    # in headless mode). We provide empty waypoints so validate() succeeds.
+                    self_inner._waypoints = []
                 _inner.init_episode = _types.MethodType(_ps_safe_init, _inner)
                 _inner.is_static_workspace = _types.MethodType(_ps_is_static, _inner)
-                print(bcolors.OKGREEN + '[rlbench_env.py] PATCHED PressSwitch.init_episode + is_static_workspace for headless mode (safe joint init)' + bcolors.ENDC)
+                _inner.validate = _types.MethodType(_ps_validate, _inner)
+                print(bcolors.OKGREEN + '[rlbench_env.py] PATCHED PressSwitch.init_episode + is_static + validate for headless mode' + bcolors.ENDC)
             except Exception as _ps_e:
                 import traceback
                 print(bcolors.WARNING + f'[rlbench_env.py] PressSwitch patch failed: {_ps_e}' + bcolors.ENDC)
@@ -3792,10 +3798,15 @@ class VoxPoserRLBench():
 
                 def _kb_is_static(self_inner):
                     return True
+
+                def _kb_validate(self_inner):
+                    # Skip waypoint generation (IK calls can return V-REP -1 in headless)
+                    self_inner._waypoints = []
                 import numpy as _np
                 _inner.init_episode = _types.MethodType(_kb_safe_init, _inner)
                 _inner.is_static_workspace = _types.MethodType(_kb_is_static, _inner)
-                print(bcolors.OKGREEN + '[rlbench_env.py] PATCHED PutKnifeInKnifeBlock.init_episode + static (skip SpawnBoundary loops)' + bcolors.ENDC)
+                _inner.validate = _types.MethodType(_kb_validate, _inner)
+                print(bcolors.OKGREEN + '[rlbench_env.py] PATCHED PutKnifeInKnifeBlock.init_episode + static + validate' + bcolors.ENDC)
             except Exception as _kb_e:
                 import traceback
                 print(bcolors.WARNING + f'[rlbench_env.py] PutKnifeInKnifeBlock patch failed: {_kb_e}' + bcolors.ENDC)
