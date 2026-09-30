@@ -1,4 +1,4 @@
-env_name: rlbench
+﻿env_name: rlbench
 
 planner:
   stop_threshold: 0.001
@@ -33,7 +33,7 @@ lmp_config:
   lmps:
     planner:
       prompt_fname: planner_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -48,7 +48,7 @@ lmp_config:
       load_cache: True
     composer:
       prompt_fname: composer_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -63,7 +63,7 @@ lmp_config:
       load_cache: True
     parse_query_obj:
       prompt_fname: parse_query_obj_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -78,7 +78,7 @@ lmp_config:
       load_cache: True
     get_affordance_map:
       prompt_fname: get_affordance_map_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -93,7 +93,7 @@ lmp_config:
       load_cache: True
     get_avoidance_map:
       prompt_fname: get_avoidance_map_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -108,7 +108,7 @@ lmp_config:
       load_cache: True
     get_velocity_map:
       prompt_fname: get_velocity_map_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -123,7 +123,7 @@ lmp_config:
       load_cache: True
     get_rotation_map:
       prompt_fname: get_rotation_map_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '
@@ -138,7 +138,7 @@ lmp_config:
       load_cache: True
     get_gripper_map:
       prompt_fname: get_gripper_map_prompt
-      model: gpt-4
+      model: deepseek-flash
       max_tokens: 4096
       temperature: 0
       query_prefix: '# Query: '

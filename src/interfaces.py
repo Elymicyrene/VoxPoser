@@ -3,6 +3,7 @@ from utils import get_clock_time, normalize_vector, pointat2quat, bcolors, Obser
 import numpy as np
 from planners import PathPlanner
 import time
+import os
 import traceback
 from scipy.ndimage import distance_transform_edt
 import transforms3d
@@ -182,6 +183,25 @@ class LMP_interface():
           _gripper_map = VoxelIndexingWrapper(
             np.ones((self._map_size, self._map_size, self._map_size)) * self._env.get_last_gripper_action()
           )
+
+        # ── Affordance visualisation hook (NPY dump) ─────────────────────
+        # Activated by env var VOXPOSER_AFF_DUMP_DIR (set by run_real10.py).
+        # Saves one set of maps per LLM-execute call — first plan_iter only.
+        _dump_dir = os.environ.get('VOXPOSER_AFF_DUMP_DIR', '').strip()
+        if _dump_dir and plan_iter == 0:
+          try:
+            os.makedirs(_dump_dir, exist_ok=True)
+            _tag = (f'{self._env._dump_tag}'
+                    if hasattr(self._env, '_dump_tag') and self._env._dump_tag
+                    else f'ep{int(time.time()*1000) % 10_000_000}')
+            for _name, _m in [('aff', _affordance_map), ('avoid', _avoidance_map),
+                               ('rot', _rotation_map), ('vel', _velocity_map),
+                               ('grip', _gripper_map)]:
+              _arr = _m.array if hasattr(_m, 'array') else np.asarray(_m)
+              np.save(os.path.join(_dump_dir, f'{_tag}_{_name}.npy'), _arr)
+          except Exception as _de:
+            print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] aff-dump failed: {_de}{bcolors.ENDC}')
+        # ────────────────────────────────────────────────────────────────────
 
         # --- Fallback：只在 affordance_map 完全为空或全在顶部时才用对象中心作为 fallback 目标。
         #     注意：桌面高度（z<=5）的 affordance 对于 push/slide 等任务是合理的，不触发 fallback。
@@ -931,16 +951,8 @@ class LMP_interface():
                 )
               except Exception as _hpe:
                 print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 horizontal push fallback raised: {_hpe}{bcolors.ENDC}')
-              # Final fallback: directly move the object to a position off the grill
-              # (physics-based push moved EE but object may not have followed)
-              try:
-                # Use workspace bottom z (table level) so object doesn't fall from height
-                _ws_min_z = float(self._env.workspace_bounds_min[2])
-                _force_tgt = np.array([_push_tgt[0], _push_tgt[1], _ws_min_z + 0.02], dtype=float)
-                _force_ok = self._env._force_move_object_to(_mn_tok, _force_tgt, step_after=False)
-                print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 force_move_object_to("{_mn_tok}") → {_force_tgt.round(3)}: ok={_force_ok}{bcolors.ENDC}')
-              except Exception as _fme:
-                print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 force_move_object_to raised: {_fme}{bcolors.ENDC}')
+              # No force_override final fallback — physics-based push MUST work;
+              # if it doesn't, that's a genuine failure we want to measure.
           except Exception as _picke:
             print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK raised: {_picke}{bcolors.ENDC}')
       # =====================================================================
@@ -1053,14 +1065,8 @@ class LMP_interface():
               )
             except Exception:
               pass
-            # Final fallback: directly move the block to target position
-            # (physics-based push moved EE but block may not have followed)
-            try:
-              _force_tgt = np.array([_slide_tgt_xy[0], _slide_tgt_xy[1], _z_here], dtype=float)
-              _force_ok = self._env._force_move_object_to(_mn_tok, _force_tgt, step_after=False)
-              print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 force_move_object_to("{_mn_tok}") → {_force_tgt.round(3)}: ok={_force_ok}{bcolors.ENDC}')
-            except Exception as _fme:
-              print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3 force_move_object_to raised: {_fme}{bcolors.ENDC}')
+            # No force_override final fallback — physics-based push MUST work;
+            # if it doesn't, that's a genuine failure we want to measure.
           except Exception as _slidee:
             print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3 SLIDE FALLBACK raised: {_slidee}{bcolors.ENDC}')
         else:
