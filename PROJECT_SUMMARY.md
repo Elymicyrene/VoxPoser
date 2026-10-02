@@ -1,7 +1,7 @@
 # 基于 VoxPoser 的机器人操作实验进展总结
 
 > 汇报人：本人
-> 更新时间：2026-09-11
+> 更新时间：2026-10-02
 > 代码仓库：https://github.com/Elymicyrene/VoxPoser
 
 ---
@@ -35,68 +35,109 @@
 
 ## 三、实验结果
 
-综合 benchmark 共 **22 个任务**（6 个回归任务 + 16 个扩展任务），最新结果如下：
+综合 benchmark 共 **22 个任务变体**（6 个回归任务 + 16 个扩展任务）。评测采用
+**随机初始化**、不锁定随机种子、**RLBench 原生 `env.success()` 判据、不做任何成功判据修改**，
+每个变体使用全新环境实例独立运行 **10 次**（共 220 个 episode）。
 
-| 测试集 | 通过 / 总数 | 成功率 |
+| 测试项 | 基线（禁用物理补偿） | 启用物理补偿（严格口径） |
 |---|---|---|
-| 回归任务（Smoke6） | 6 / 6 | 100% |
-| 扩展任务 | 16 / 16 | 100% |
-| **总体** | **22 / 22** | **100%** |
+| `planner_success` | 85.0%（187/220） | **90.9%（200/220）** |
+| `env_success`（整体） | 8.2%（18/220） | **28.2%（62/220）** |
+| joint / 开关类（PushButton / LampOff / PressSwitch，6 变体） | 13.3%（8/60） | **90.0%（54/60）** |
 
-> 全部 22 个任务变体均通过 `env_success=True`。其中绝大部分任务的 LLM 规划器完整执行（`planner_success=True`）；PutRubbishInBin 偶发触发 300s 规划超时，但 success() 的 force-override（将 rubbish 直接传送至 success 接近传感器）保证确定性通过。
+> **关于早期"100%"数字的更正**：早期汇总中曾出现"22/22 = 100%"，其一部分来自
+> "把物体直接传送到成功接近传感器"或"把末端标记物传送到目标位姿即宣告成功"的人工兜底。
+> 这类兜底会**改写成功判据**，属于假成功，已按导师要求**全部移除**。
+> 上表为移除后、仅依赖真实物理执行与原生判据的**严格口径**结果。
+> 同时修复了 CoppeliaSim 运动规划插件（OMPL / IK）的加载问题，`planner_success` 由 85.0% 升至 90.9%。
 
-**逐任务结果：**
+**分类结果（严格口径）：**
 
-| 任务 | 结果 | 耗时 | 任务类型 |
+| 类别 | 变体数 | env_success | 说明 |
 |---|---|---|---|
-| PushButton (×2) | ✅ | ~39-135s | 按钮按压 |
-| LampOff (×2) | ✅ | ~39-53s | 开关控制 |
-| SlideBlockToTarget | ✅ | 42s | 推拉物体 |
-| MeatOffGrill | ✅ | 89s | 取放物体 |
-| PressSwitch (×2) | ✅ | ~40-45s | 开关按压 |
-| StackCups (×3) | ✅ | ~126-143s | 多步堆叠 |
-| PutRubbishInBin | ✅ | 300s（规划超时，force-override 通过） | 垃圾投放 |
-| TakeLidOffSaucepan | ✅ | 116s | 取盖子 |
-| TakeUmbrellaOutOfUmbrellaStand | ✅ | 55s | 抽取物体 |
-| PlaceCups | ✅ | — | 多物体放置 |
-| PlaceShapeInShapeSorter | ✅ | — | 形状匹配 |
-| PutKnifeInKnifeBlock | ✅ | — | 刀具入架 |
-| PickAndLift | ✅ | — | 抓取抬起 |
-| ReachTarget | ✅ | — | 到达目标 |
-| StackBlocks | ✅ | — | 积木堆叠 |
-| EmptyContainer | ✅ | — | 清空容器 |
-| BlockPyramid | ✅ | — | 金字塔堆叠 |
+| joint / 开关类 | 6 | 90.0%（54/60） | 物理层补偿的主要受益者 |
+| 抓取 / 堆叠 / 搬运类（非 joint） | 16 | 5.0%（8/160） | 受规划末期收敛误差与抓取执行环节限制 |
+
+**非 joint 任务的进展**：ReachTarget 0/10 → **5/10**、SlideBlockToTarget 0/10 → **2/10**，
+修复后首次取得非零成功。
+
+**逐任务结果（10 次/变体）：**
+
+| 任务 | 变体 | env_success | planner_success |
+|---|---|---|---|
+| PushButton | var0 / var1 | 9/10 · 9/10 | 10/10 · 10/10 |
+| LampOff | var0 / var1 | 9/10 · 8/10 | 9/10 · 8/10 |
+| PressSwitch | var0 / var1 | 9/10 · 10/10 | 9/10 · 10/10 |
+| SlideBlockToTarget | var0 | 2/10 | 9/10 |
+| ReachTarget | var0 | 5/10 | 10/10 |
+| StackCups | var0 / var1 / var2 | 0/10 · 0/10 · 0/10 | 10/10 · 10/10 · 7/10 |
+| MeatOffGrill | var0 | 0/10 | 9/10 |
+| PutRubbishInBin | var0 | 1/10 | 10/10 |
+| TakeLidOffSaucepan | var0 | 0/10 | 10/10 |
+| TakeUmbrellaOutOfUmbrellaStand | var0 | 0/10 | 10/10 |
+| PlaceCups | var0 | 0/10 | 9/10 |
+| PlaceShapeInShapeSorter | var0 | 0/10 | 7/10 |
+| PutKnifeInKnifeBlock | var0 | 0/10 | 10/10 |
+| PickAndLift | var0 | 0/10 | 10/10 |
+| StackBlocks | var0 | 0/10 | 6/10 |
+| EmptyContainer | var0 | 0/10 | 9/10 |
+| BlockPyramid | var0 | 0/10 | 8/10 |
 
 ---
 
 ## 四、遇到的问题与解决思路
 
 ### 4.1 Headless 模式下的物理引擎崩溃
-- **问题**：部分任务（如 PlaceCups、TakeOffWeighingScales）在初始化时 CoppeliaSim 进程崩溃（ACCESS_VIOLATION）。
+- **问题**：部分任务（如 PlaceCups）在初始化时 CoppeliaSim 进程崩溃（ACCESS_VIOLATION）。
 - **原因**：任务初始化中调用了 `SpawnBoundary` 进行随机物体放置，该操作依赖物理引擎碰撞检测，在 headless 模式下不稳定。
-- **解决**：通过类级 Monkey-patch 替换 `SpawnBoundary` 的随机放置方法，改为确定性安全放置，彻底规避物理引擎调用。
+- **解决**：**按导师要求不再对任务初始化做任何 Monkey-patch**（不再替换 `SpawnBoundary`、不强制静态工作区），
+  以保证随机初始化的真实性；改为在评测流水线层做**进程隔离**（每个 episode 使用全新环境实例），
+  崩溃的 episode 如实计为失败。headless 下同时禁用视觉传感器、调优物理参数（dt=2ms / substeps=10）以降低崩溃率。
 
 ### 4.2 任务初始化阶段的 IK 校验失败
 - **问题**：PressSwitch、PutKnifeInKnifeBlock 在 reset 阶段多次重试后失败，V-REP 返回错误码 -1。
 - **原因**：场景初始化时会进行机械臂逆运动学（IK）可行性校验，headless 模式下 IK 求解不稳定。
-- **解决**：对这两个任务强制使用静态工作区配置，跳过 IK 可行性校验步骤。
+- **解决**：该错误码与运动规划插件加载失败同源，随插件宿主库路径修复（见 4.4）而消失。
+  按导师要求，现**不再对任何任务做"静态工作区 / 跳过校验"的补丁**（`_patch_task_for_headless()` 为空操作），
+  所有任务使用真实随机初始化，初始化失败按真实失败计入。
 
 ### 4.3 长时序任务超时与 shutdown 段错误
-- **问题**：PutRubbishInBin 等长时序任务在规划器执行超过 480s 后超时，看门狗杀死 sim 进程后，success() 访问已死亡的 PyRep 对象句柄触发 0xC0000005 段错误，导致结果 JSON 无法写入。
-- **原因**：规划器超时时看门狗默认杀死 sim，但后续 success() 检查仍尝试访问已失效的 C++ 句柄。
+- **问题**：PutRubbishInBin 等长时序任务在规划器执行超时后，看门狗杀死 sim 进程，随后 success() 访问已死亡的 PyRep 对象句柄触发 0xC0000005 段错误，导致结果 JSON 无法写入。
+- **原因**：规划器超时时看门狗杀死 sim，但后续 success() 检查仍尝试访问已失效的 C++ 句柄。
 - **解决**：
-  1. 为 PutRubbishInBin 设置独立的 300s 规划超时（接近其已知 ~294s 成功时间）。
-  2. 超时后不杀死 sim，使 success() 的 force-override（将 rubbish 传送至 success 传感器）仍可执行。
-  3. shutdown_env_cleanly 中先杀死 sim 进程再调用 env.shutdown()，避免仍在运行的规划器线程访问死亡 sim。
+  1. 为长时序任务设置独立的规划超时预算，避免无谓的 480s 空等。
+  2. 超时后**不修改任何成功判据**，如实记为失败。
+  3. shutdown 流程中先杀死 sim 进程再调用 env.shutdown()，避免仍在运行的规划器线程访问死亡 sim。
   4. 规划器超时后跳过 reset_to_default_pose，防止与存活的规划器线程冲突。
+
+### 4.4 运动规划插件未加载（R1）与传送式假成功（R2）
+- **问题**：headless 下每个 episode 都出现
+  `simExtOMPL: error: could not find or correctly load the CoppeliaSim library`
+  （`simExtIK` / `simExtGeometric` / `simExtImage` / `simExtICP` 同理），
+  RLBench 的位姿规划动作 100% 失败并抛 `The call failed on the V-REP side. Return value: -1`，
+  整条运动规划链路被降级为裸 IK + 直接关节控制。
+- **原因**：这些插件通过 `GetModuleFileNameA(NULL)` **自算宿主库路径**（主模块目录 + `coppeliaSim.dll`）。
+  而 PyRep 是**进程内**启动 CoppeliaSim，进程主模块是 `python.exe`，其目录下没有该 DLL，故必然加载失败。
+- **解决**：改用位于 CoppeliaSim 根目录内的 `python.exe` 启动评测脚本，使宿主模块目录正确。
+  修复后 OMPL / IK 插件正常加载，机械臂报错由插件级错误变为 RLBench 原生的
+  `A path could not be found`，`planner_success` 由 85.0% 升至 90.9%。
+- **同时移除的假成功（R2）**：早期为提升通过率，代码中曾存在
+  "把物体直接传送到成功接近传感器"或"把末端标记物传送到目标位姿即宣告成功"的兜底。
+  这类操作会改写成功判据并污染运动学参考系，已按导师要求**全部删除**；
+  `success()` 现为 RLBench 原生判据的**纯包装函数**，`_patch_task_for_headless()` 为空操作，
+  所有任务均使用真实的随机初始化。
 
 ---
 
 ## 五、后续计划
 
 ### 短期（1-2 周）
-1. **扩展任务覆盖**：将测试任务从 22 个扩展到 30+ 个，覆盖更多操作类型（如打开抽屉、放入抽屉等）。
-2. **规划器稳定性优化**：针对 PutRubbishInBin 等长时序任务，优化 LLM prompt 减少子任务分解层级，降低规划超时概率。
+1. **修复抓取执行环节**：非 joint 任务的当前主导瓶颈是抓取——夹爪在物体附近闭合却夹不住
+   （原生判据 `NothingGrasped=True` / `GraspedCondition=False`）。计划修正后处理中
+   "按压 / 滑动"启发式的误判、以及抓取 / 滑动路由词表不全的问题。
+2. **规划末期收敛误差**：OMPL / IK 规划终点仍残留约 0.10 m 误差，结合闭环 IK 小步推进进一步收敛，
+   减少回退到启发式兜底的次数。
+3. **失效归因报告**：已按"感知 / 代码生成 / 规划执行"三阶段输出归因报告，并给出 R1/R2 修复前后对照。
 
 ### 中期（1-2 月）
 1. **感知管线集成**：当前使用仿真环境提供的 ground truth 物体掩码。后续计划集成 OWL-ViT + SAM2 实现开放词汇检测与分割，使系统更接近真实部署条件。
@@ -113,5 +154,6 @@
 ## 六、代码仓库
 
 - **GitHub 地址**：https://github.com/Elymicyrene/VoxPoser
-- **核心修改文件**：`src/envs/rlbench_env.py`（headless 兼容性修复、成功条件增强、关节检测扩展）
-- **Benchmark 入口**：`experiment_results/run_comprehensive.py`
+- **核心修改文件**：`src/envs/rlbench_env.py`（headless 兼容性、物理层补偿、删除传送式假成功）、
+  `src/interfaces.py`（价值图生成与动作路由）
+- **评测入口**：`experiment_results/run_real10.py`（22 个任务变体 × 10 次，随机初始化 + 原生判据）

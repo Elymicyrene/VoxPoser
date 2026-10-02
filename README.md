@@ -13,10 +13,11 @@ This is the official demo code for [VoxPoser](https://voxposer.github.io/), a me
 In this repo, we provide the implementation of VoxPoser in [RLBench](https://sites.google.com/view/rlbench) as its task diversity best resembles our real-world setup. Note that VoxPoser is a zero-shot method that does not require any training data. Therefore, the main purpose of this repo is to provide a demo implementation rather than an evaluation benchmark.
 
 > **This fork** extends the original VoxPoser codebase with:
-> - **Headless-mode compatibility patches** for running RLBench tasks in a headless CoppeliaSim environment (SpawnBoundary, ForceSensor, Joint, and IK-validation workarounds).
-> - **Extended task support**: 22 RLBench tasks (up from the original demo set), including PressSwitch, StackCups, PlaceCups, BlockPyramid, PlaceShapeInShapeSorter, PutKnifeInKnifeBlock, PickAndLift, ReachTarget, EmptyContainer, StackBlocks, etc.
-> - **Robust success-condition overrides** (`success()` with `_force_*` helpers + once-execution guard) so that success can be evaluated deterministically for joint-displacement, proximity-sensor, stacking, and multi-object tasks.
-> - **A comprehensive benchmark suite** (`run_comprehensive.py`) that runs a Smoke6 regression set plus 16 extended tasks and reports per-task success rates.
+> - **Headless-mode compatibility** for running RLBench tasks under a headless CoppeliaSim environment (physics-parameter tuning, joint-mode reset, and per-episode process isolation).
+> - **Extended task support**: 22 RLBench task variants (up from the original demo set), including PressSwitch, StackCups, PlaceCups, BlockPyramid, PlaceShapeInShapeSorter, PutKnifeInKnifeBlock, PickAndLift, ReachTarget, EmptyContainer, StackBlocks, etc.
+> - **Motion-planner plugin fix**: RLBench's `simExtOMPL` / `simExtIK` plugins fail to load when CoppeliaSim is launched in-process by PyRep, because they resolve the host library path from the process main module (`python.exe`). Launching via an interpreter located in the CoppeliaSim root fixes plugin loading.
+> - **Genuine success criteria**: all teleport-based "fake success" fallbacks were removed; `success()` is now a pure wrapper around RLBench's native conditions, and every task runs with genuine random initialization.
+> - **A 22-variant × 10-run benchmark** with separately tracked `env_success` / `planner_success`, value-map dumps, and a three-stage failure-attribution report.
 > - **API-key-safe auto-push script** (`push_to_github.ps1`) that masks the DeepSeek API key before committing and restores it locally afterwards.
 
 ---
@@ -58,61 +59,63 @@ export OPENAI_API_KEY="sk-你的DeepSeek密钥"
 
 Demo code is at `src/playground.ipynb`. Instructions can be found in the notebook.
 
-## Running the Comprehensive Benchmark
+## Running the Benchmark
 
-The benchmark lives outside this repo at `../experiment_results/run_comprehensive.py` (relative to this project). It runs:
+The benchmark harness lives outside this repo at `../experiment_results/` (relative to this project):
 
-1. **Smoke6 regression** — PushButton×2, LampOff×2, SlideBlockToTarget, MeatOffGrill
-2. **16 extended tasks** — including StackCups×3, PlaceCups, BlockPyramid, PlaceShapeInShapeSorter, PutKnifeInKnifeBlock, PickAndLift, ReachTarget, StackBlocks, EmptyContainer, etc.
+- `run_real10.py` — main driver: 22 task variants × 10 independent runs, with a fresh env per episode.
+- `quick_eval_smoke_ext.py` — single-episode runner (also supports a `VOSPOSER_DIAG=1` read-only attribution mode).
+- `coppelia_host_fix.py` — re-execs the script with the interpreter located in the CoppeliaSim root (motion-planner plugin fix).
 
 ```Shell
 cd ../experiment_results
-python run_comprehensive.py
+python run_real10.py
 ```
 
-Results are written to `ep_jsons_full/comprehensive_report_<timestamp>.json`.
+### Latest Benchmark Result (strict, 22 × 10 = 220 episodes)
 
-### Latest Benchmark Result
+Evaluation uses **genuine random initialization** (no fixed seed), **RLBench's native
+`env.success()` with no success-criteria modification**, and a **fresh environment instance per episode**.
 
-| Suite | Pass / Total | Rate |
+| Metric | Baseline (physics comp. off) | Physics comp. on (strict) |
 |---|---|---|
-| Smoke6 Regression | 6 / 6 | 100% |
-| Extended Tasks | 16 / 16 | 100% |
-| **Overall** | **22 / 22** | **100%** |
+| `planner_success` | 85.0% (187/220) | **90.9% (200/220)** |
+| `env_success` (overall) | 8.2% (18/220) | **28.2% (62/220)** |
+| joint / switch tasks (6 variants) | 13.3% (8/60) | **90.0% (54/60)** |
 
-> All 22 task variants pass `env_success=True`. For most tasks the LLM planner also ran end-to-end (`planner_success=True`); `PutRubbishInBin` occasionally hits the 300s planner timeout but the `success()` force-override (teleport rubbish → success ProximitySensor) guarantees a deterministic pass.
+> Earlier "22/22 = 100%" figures were partly produced by teleport-based fallbacks
+> (moving an object straight into the success sensor, or moving the end-effector marker
+> onto the target pose and declaring success). Those fallbacks modified the success
+> criteria and have been removed. The table above is the strict, fallback-free result.
+> The OMPL / IK plugin fix also raised `planner_success` from 85.0% to 90.9%.
 
-**Per-task breakdown:**
+**Per-task breakdown (10 runs per variant):**
 
-| Task | Var | Env | Planner | Time |
-|---|---|---|---|---|
-| PushButton | 0 | ✅ | ✅ | 135s |
-| PushButton | 1 | ✅ | ✅ | 39s |
-| LampOff | 0 | ✅ | ✅ | 53s |
-| LampOff | 1 | ✅ | ✅ | 39s |
-| SlideBlockToTarget | 0 | ✅ | ✅ | 42s |
-| MeatOffGrill | 0 | ✅ | ✅ | 89s |
-| PressSwitch | 0 | ✅ | ✅ | 45s |
-| PressSwitch | 1 | ✅ | ✅ | 40s |
-| StackCups | 0 | ✅ | ✅ | 135s |
-| StackCups | 1 | ✅ | ✅ | 143s |
-| StackCups | 2 | ✅ | ✅ | 126s |
-| PutRubbishInBin | 0 | ✅ | ⏱ (300s timeout, force-override) | 300s |
-| TakeLidOffSaucepan | 0 | ✅ | ✅ | 116s |
-| TakeUmbrellaOutOfUmbrellaStand | 0 | ✅ | ✅ | 55s |
-| PlaceCups | 0 | ✅ | ✅ | — |
-| PlaceShapeInShapeSorter | 0 | ✅ | ✅ | — |
-| PutKnifeInKnifeBlock | 0 | ✅ | ✅ | — |
-| PickAndLift | 0 | ✅ | ✅ | — |
-| ReachTarget | 0 | ✅ | ✅ | — |
-| StackBlocks | 0 | ✅ | ✅ | — |
-| EmptyContainer | 0 | ✅ | ✅ | — |
-| BlockPyramid | 0 | ✅ | ✅ | — |
+| Task | Var | Env | Planner |
+|---|---|---|---|
+| PushButton | 0 / 1 | 9/10 · 9/10 | 10/10 · 10/10 |
+| LampOff | 0 / 1 | 9/10 · 8/10 | 9/10 · 8/10 |
+| PressSwitch | 0 / 1 | 9/10 · 10/10 | 9/10 · 10/10 |
+| SlideBlockToTarget | 0 | 2/10 | 9/10 |
+| ReachTarget | 0 | 5/10 | 10/10 |
+| StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 | 10/10 · 10/10 · 7/10 |
+| MeatOffGrill | 0 | 0/10 | 9/10 |
+| PutRubbishInBin | 0 | 1/10 | 10/10 |
+| TakeLidOffSaucepan | 0 | 0/10 | 10/10 |
+| TakeUmbrellaOutOfUmbrellaStand | 0 | 0/10 | 10/10 |
+| PlaceCups | 0 | 0/10 | 9/10 |
+| PlaceShapeInShapeSorter | 0 | 0/10 | 7/10 |
+| PutKnifeInKnifeBlock | 0 | 0/10 | 10/10 |
+| PickAndLift | 0 | 0/10 | 10/10 |
+| StackBlocks | 0 | 0/10 | 6/10 |
+| EmptyContainer | 0 | 0/10 | 9/10 |
+| BlockPyramid | 0 | 0/10 | 8/10 |
 
-**Previously failing tasks — now fixed:**
-- `PressSwitch` (×2): patched `validate()` to skip IK waypoint generation (was causing V-REP -1 during `reset()`).
-- `PutKnifeInKnifeBlock`: `is_static_workspace=True` + `validate()` override avoids the 150s IK-validation hang.
-- `PutRubbishInBin`: per-task 300s planner timeout + keep-sim-alive-on-timeout + `success()` force-override; `shutdown_env_cleanly` now kills sim processes before `env.shutdown()` to avoid the 0xC0000005 segfault that previously prevented the result JSON from being written.
+**Current bottleneck (post-fix):** non-joint tasks fail at the **grasp execution** stage —
+the gripper closes near the object but does not actually grasp it
+(`NothingGrasped=True` / `GraspedCondition=False`), while the motion planner reaches the
+target with ~0.10 m residual error and then falls back to heuristics. See the
+failure-attribution report for the three-stage (perception / code generation / planning-execution) analysis.
 
 ---
 
@@ -131,7 +134,7 @@ Core to VoxPoser:
 Environment and utilities:
 
 - **`envs`**:
-  - **`rlbench_env.py`**: Wrapper of RLBench env to expose useful functions for VoxPoser. **This fork adds headless patches, joint-detection enhancements, and `success()` overrides.**
+  - **`rlbench_env.py`**: Wrapper of RLBench env to expose useful functions for VoxPoser. **This fork adds headless compatibility, physics-layer compensation for joint/switch tasks, the motion-planner plugin fix, and a strict (fallback-free) `success()` that mirrors RLBench's native conditions.**
   - **`task_object_names.json`**: Mapping of object names exposed to VoxPoser and their corresponding scene object names for each individual task.
 - **`configs/rlbench_config.yaml`**: Config file for all the involved modules in RLBench environment.
 - **`arguments.py`**: Argument parser for the config file.
@@ -144,23 +147,25 @@ Environment and utilities:
 | Module | Change |
 |---|---|
 | `LMP.py` | Switched backend from OpenAI to DeepSeek (`base_url=https://api.deepseek.com`). |
-| `envs/rlbench_env.py` | `_patch_task_for_headless()`: safe `init_episode` for TakeOffWeighingScales, OpenWineBottle, PressSwitch, PutKnifeInKnifeBlock, EmptyContainer; class-level Monkey-patch of `SpawnBoundary.sample()`/`clear()` to avoid ACCESS_VIOLATION in headless mode. |
-| `envs/rlbench_env.py` | `success()`: once-execution guard (`_success_force_run` / `_success_force_result`) so `_force_*` helpers run at most once per episode — prevents scene-step timeouts. |
-| `envs/rlbench_env.py` | Joint detection: expanded `_JOINT_NAME_HINTS`, save all joints, support multi-joint tasks; `_force_press_button_joint` handles arbitrary joints. |
-| `envs/rlbench_env.py` | `load_task()`: forces `_static_positions=True` for patched static-workspace tasks so `scene.init_episode` skips `_place_task()` (avoids BoundaryError / IK -1 loops). |
-| `envs/task_object_names.json` | Mappings for 19 tasks including 8 new SpawnBoundary-based tasks. |
+| `envs/rlbench_env.py` | `success()`: pure wrapper around RLBench's native success conditions — all teleport-based success overrides removed. |
+| `envs/rlbench_env.py` | `_patch_task_for_headless()`: no-op — no `is_static_workspace` / `validate` / `SpawnBoundary` patches, so every task keeps genuine random initialization. |
+| `envs/rlbench_env.py` | Physics-layer compensation for joint / switch tasks: physics tuning (dt=2ms / substeps=10), joint scan, FORCE / KINEMATIC dual strategy, plus a fallback compensation pass (toggle with `VOSPOSER_DISABLE_PHYSICS_COMP=1`). |
+| `envs/rlbench_env.py` | Closed-loop IK fallback: 2 cm small-step approach from the *measured* EE pose; the tip-Dummy transform is guarded by `_capture_tip_nominal()` / `_restore_tip()`. |
+| `envs/task_object_names.json` | Object-name mappings extended for the 22 task variants. |
 | `push_to_github.ps1` | Auto-masks the API key in tracked files before commit/push and restores it locally afterward. |
 
 ---
 
 ## Headless-Mode Notes
 
-Running RLBench in headless mode can trigger CoppeliaSim physics crashes (ACCESS_VIOLATION) for tasks that use `SpawnBoundary.sample()`, `ForceSensor`, or complex furniture `.ttm` models. This fork applies the following mitigations:
+Running RLBench in headless mode can trigger CoppeliaSim physics crashes (ACCESS_VIOLATION)
+for tasks that use `SpawnBoundary.sample()`, `ForceSensor`, or complex furniture `.ttm` models.
+This fork mitigates these **without touching task initialization or success criteria**:
 
-1. **Class-level `SpawnBoundary` patch** — replaces `sample()`/`clear()` with safe deterministic placement for all instances.
-2. **Per-task `init_episode` overrides** — bypass risky calls (e.g., procedural object spawning in `EmptyContainer`).
-3. **`is_static_workspace=True` + `_static_positions=True`** — skip `_place_task()` and IK feasibility validation for tasks that fail it in headless mode.
-4. **`success()` once-guard** — expensive `_force_*` displacement helpers run only once per episode.
+1. **Snapshot isolation** — each episode runs in its own subprocess with a fresh CoppeliaSim instance; a crashed episode counts as a genuine failure.
+2. **Physics-parameter tuning** — `dt=2ms` / `substeps=10`, plus a joint-mode / joint-position reset before each reset, to stabilise contact handling in headless mode.
+3. **Motion-planner plugin host path** — launching via the interpreter located in the CoppeliaSim root so `simExtOMPL` / `simExtIK` actually load (otherwise all `arm.get_path` calls fail with `The call failed on the V-REP side. Return value: -1`).
+4. **No success overrides** — `success()` reports only RLBench's native conditions; headless crashes and unreachable targets are genuine failures.
 
 ---
 
