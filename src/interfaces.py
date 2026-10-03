@@ -122,6 +122,7 @@ class LMP_interface():
     # and movable identity after planner / controller loop exits.
     _last_target_center_world = None   # world-frame [x, y, z] center of last affordance target (after sanity-check override)
     _last_movable_world_pos = None     # world-frame [x, y, z] center of movable object (for slide target fallback)
+    _last_movable_top_z = None         # world-frame top (max z) of movable object's AABB (for grasp approach height)
     _last_movable_name = None          # raw name string from movable_obs for classification
     if affordance_map is not None:
       # execute path in closed-loop
@@ -766,7 +767,19 @@ class LMP_interface():
                           'grape', 'lemon', 'lime', 'mango', 'peach', 'plum',
                           'cup', 'mug', 'bottle', 'can', 'pot', 'pan',
                           'plate', 'bowl', 'tissue', 'book', 'box', 'cube'}
-      _SLIDABLE_TOKENS = {'slider', 'sliders', 'block', 'blocks', 'brick', 'drawer'}
+      _SLIDABLE_TOKENS = {'slider', 'sliders', 'drawer'}
+      # R4: "block/brick" 既可被抓起（pick up the block）也可被推动
+      # （slide the block to target），单靠名词无法判定 → 归入歧义集合，
+      # 由当前 episode 的指令动词决定类别。
+      _AMBIG_TOKENS = {'block', 'blocks', 'brick', 'bricks'}
+      _SLIDE_VERBS = ('slide', 'push', 'shove', 'nudge', 'drag')
+      _PICK_VERBS = ('pick', 'lift', 'stack', 'unstack', 'place', 'put',
+                     'build', 'grasp', 'grab', 'take', 'hold', 'carry', 'insert')
+      _instr_low = ''
+      try:
+        _instr_low = str(getattr(self._env, 'current_instruction', '') or '').lower()
+      except Exception:
+        _instr_low = ''
       _mn_tok = None
       try:
         if _last_movable_name:
@@ -787,6 +800,15 @@ class LMP_interface():
       _is_control = (_mn_tok and _mn_tok in _CONTROL_TOKENS) or (not object_centric)
       _is_pickable = (_mn_tok and _mn_tok in _PICKABLE_TOKENS)
       _is_slidable = (_mn_tok and _mn_tok in _SLIDABLE_TOKENS)
+      # ── R4: 歧义名词（block/brick）按当前指令动词判定类别 ─────────────
+      if _mn_tok in _AMBIG_TOKENS:
+        _has_slide_v = any(_v in _instr_low for _v in _SLIDE_VERBS)
+        _has_pick_v = any(_v in _instr_low for _v in _PICK_VERBS)
+        if _has_slide_v and not _has_pick_v:
+          _is_slidable, _is_pickable = True, False
+        else:
+          _is_pickable, _is_slidable = True, False
+        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: R4 ambiguous token "{_mn_tok}" (instr="{_instr_low[:70]}") → pickable={_is_pickable} slidable={_is_slidable}{bcolors.ENDC}')
       # ── EE-centric scene-inference fallback ─────────────────────────────
       # When movable_obs probe failed → EE-centric mode → movable_name="ee"
       # or "gripper".  _is_control=True (from `not object_centric`), which
@@ -797,6 +819,7 @@ class LMP_interface():
         try:
           _scene_objs = self._env.get_object_names()
           _scene_toks = set()
+          _scene_name_by_tok = {}
           for _so in _scene_objs:
             _so_l = _so.lower().strip()
             _so_tok = _so_l
@@ -806,26 +829,69 @@ class LMP_interface():
             _mm_sc = _re_if_sc.match(r'^(.*?)(\d+)$', _so_tok)
             if _mm_sc: _so_tok = _mm_sc.group(1)
             _scene_toks.add(_so_tok)
+            _scene_name_by_tok.setdefault(_so_tok, _so)
           # Check for pickable objects in scene (meat, steak, cup, etc.)
           _scene_pickable = _scene_toks & _PICKABLE_TOKENS
           _scene_slidable = _scene_toks & _SLIDABLE_TOKENS
           _scene_control = _scene_toks & _CONTROL_TOKENS
+          _scene_ambig = _scene_toks & _AMBIG_TOKENS
           if _scene_pickable and not _scene_control:
             _is_pickable = True
             _is_control = False
-            _mn_tok = list(_scene_pickable)[0]
+            # 目标错配修复：场景里可能同时有 chicken 和 steak（MeatOffGrill），
+            # 原先 list(set)[0] 是任意选择 → 抓取目标可能与本 episode 目标差 0.15m。
+            # 优先选指令中点名的那个对象，再用 sorted 保证确定性。
+            _mn_tok = next((_t for _t in sorted(_scene_pickable) if _t in _instr_low),
+                           sorted(_scene_pickable)[0])
             _last_movable_name = _mn_tok
-            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: EE-mode → scene-inference: found PICKABLE "{_mn_tok}" in scene objects; override control→pickable{bcolors.ENDC}')
+            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: EE-mode → scene-inference: found PICKABLE "{_mn_tok}" in scene objects (instr="{_instr_low[:70]}"); override control→pickable{bcolors.ENDC}')
           elif _scene_slidable and not _scene_control:
             _is_slidable = True
             _is_control = False
             _mn_tok = list(_scene_slidable)[0]
             _last_movable_name = _mn_tok
             print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: EE-mode → scene-inference: found SLIDABLE "{_mn_tok}" in scene objects; override control→slidable{bcolors.ENDC}')
+          elif _scene_ambig and not _scene_control:
+            # R4: 歧义名词 → 用指令动词决定 pickable / slidable
+            _amb_tok = sorted(_scene_ambig)[0]
+            _has_slide_v = any(_v in _instr_low for _v in _SLIDE_VERBS)
+            _has_pick_v = any(_v in _instr_low for _v in _PICK_VERBS)
+            _mn_tok = _amb_tok
+            _last_movable_name = _amb_tok
+            _is_control = False
+            if _has_slide_v and not _has_pick_v:
+              _is_slidable, _is_pickable = True, False
+            else:
+              _is_pickable, _is_slidable = True, False
+            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: EE-mode → scene-inference: found AMBIGUOUS "{_amb_tok}" (instr="{_instr_low[:70]}") → pickable={_is_pickable} slidable={_is_slidable}{bcolors.ENDC}')
+          # ── R4/G1: EE-mode 下 _last_movable_world_pos 记录的是 EE 自身位置，
+          # 会污染 Fix2 的抓取目标（在空处闭爪）。这里用场景中真实物体的
+          # 世界坐标（点云质心 + 顶面高度）覆盖它。 ──
+          _full_nm = _scene_name_by_tok.get(_mn_tok)
+          if _full_nm:
+            try:
+              # 优先真实名解析并按本 episode 指令消歧（'meat'→steak/chicken）；
+              # 语义点云 get_3d_obs_by_name 在 headless 下把 'meat' 一律解析到先注册
+              # 的 chicken，会把抓取目标换成错误物体（实测指令 steak、却 grasp 到 chicken）。
+              _rp_sc, _rtz_sc = self._env.get_object_pos_by_name(_mn_tok)
+              if _rp_sc is not None:
+                _last_movable_world_pos = np.asarray(_rp_sc, dtype=float).reshape(3).copy()
+                _last_movable_top_z = (float(_rtz_sc) if _rtz_sc is not None
+                                       else float(_last_movable_world_pos[2]))
+                print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: scene-inference resolved movable "{_full_nm}" real center={_last_movable_world_pos.round(3)} top_z={_last_movable_top_z:.3f} via real-name lookup{bcolors.ENDC}')
+              else:
+                _pc_sc, _ = self._env.get_3d_obs_by_name(_full_nm)
+                _pc_sc = np.asarray(_pc_sc, dtype=float).reshape(-1, 3)
+                if _pc_sc.shape[0] > 0:
+                  _last_movable_world_pos = _pc_sc.mean(axis=0).copy()
+                  _last_movable_top_z = float(_pc_sc[:, 2].max())
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: scene-inference resolved movable "{_full_nm}" real center={_last_movable_world_pos.round(3)} top_z={_last_movable_top_z:.3f} via scene scan{bcolors.ENDC}')
+            except Exception as _sre:
+              print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] scene-inference pos resolve failed for "{_full_nm}": {_sre}{bcolors.ENDC}')
         except Exception:
           pass
       if _mn_tok:
-        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: movable_name="{_last_movable_name}" → token="{_mn_tok}" → control={_is_control} pickable={_is_pickable} slidable={_is_slidable}{bcolors.ENDC}')
+        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: movable_name="{_last_movable_name}" → token="{_mn_tok}" → control={_is_control} pickable={_is_pickable} slidable={_is_slidable} grasped_before={_grasped_before} intend_close={_intend_close}{bcolors.ENDC}')
       _ee_z = None
       try:
         _ee_z = float(self._env.get_ee_pos()[2])
@@ -838,6 +904,50 @@ class LMP_interface():
       # affordance_map is present), we MUST NOT enter press_mode → instead
       # fall through to the Fix2 pick / Fix3 slide fallback branches below.
       _press_mode = False
+      # 任务是否已满足：MeatOffGrill 等 pickable 任务在 post-action 每个 composer 步骤
+      # 都会重入 Fix2；若首个放置已成功（物体已进入 success 传感器），再次抓取会把
+      # 已放好的物体拖离传感器，反而毁掉成功。用原生 env.success() 作守卫。
+      try:
+        _env_done = bool(self._env.success())
+      except Exception:
+        _env_done = False
+      # ── Fix(A) 错抓纠正 ────────────────────────────────────────────────
+      # composer 的 affordance 常落在语义泛称上（'a point at the center of the
+      # meat' → headless 下 detect('meat') 解析到先注册的 chicken），RLBench 的
+      # MoveArmThenGripper 动作模式会在航点执行时就把 chicken 抓起来，于是 post-action
+      # 看到 _grasped_before>0、跳过 Fix2，最终带着错误物体走完全程。
+      # 若当前握持的可抓取物不是本 episode 指令点名的那个，先纯 IK 开爪释放，
+      # 让 Fix2 用真实名解析去抓正确目标。（仅当目标与握持物都属 PICKABLE 词表且
+      # 目标在指令中被点名时才触发，避免误伤 lid/saucepan 等未入表的任务。）
+      if _is_pickable and _grasped_before > 0:
+        try:
+          import re as _re_tgt
+          _go_names = []
+          try:
+            _go = self._env.rlbench_env._scene.robot.gripper.get_grasped_objects()
+            _go_names = [str(o.get_name()).strip().lower() for o in _go]
+          except Exception:
+            _go_names = []
+          # get_grasped_objects() 返回 RLBench 真实形状名（如 'chicken' / 'steak'）。
+          # 若握持物名分词后与指令分词完全无交集，说明抓的不是本 episode 点名的物体
+          # （典型：composer 的 'meat' 泛称被 detect 解析成先注册的 chicken）。
+          # 此时纯 IK 开爪释放，让 Fix2 用真实名+指令消歧去抓正确目标。
+          _held_toks = set()
+          for _gn in _go_names:
+            _held_toks |= {t for t in _re_tgt.split(r'[ _]+', _gn) if t}
+          _instr_toks = set(_re_tgt.findall(r'[a-z]+', _instr_low))
+          if _go_names and not (_held_toks & _instr_toks):
+            print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix(A) wrong-object grasp: holding {_go_names} not named in instr="{_instr_low}" → release, let Fix2 pick the target{bcolors.ENDC}')
+            try:
+              self._env.release_with_settle(stabilize_steps=20, lift_before_release=False)
+            except Exception:
+              pass
+            try:
+              _grasped_before = int(self._env.get_grasped_object_count())
+            except Exception:
+              _grasped_before = 0
+        except Exception:
+          pass
       if (_is_control or (_mn_tok is None)) and _did_press_down:
         # Button/switch/EE-centric task with actual press → press-mode (hold)
         _press_mode = True
@@ -869,66 +979,164 @@ class LMP_interface():
       # HIGHEST PRIORITY after press-mode: if this is a pick task, we MUST
       # attempt the grasp even if LLM said nothing about gripper_state.
       # =====================================================================
-      elif _is_pickable and _grasped_before == 0:
+      elif _is_pickable and _grasped_before == 0 and not _env_done:
         # Resolve movable position: use saved _last_movable_world_pos, or
         # query scene for the movable object by name.
         _mv_pos = None
-        if _last_movable_world_pos is not None:
-          _mv_pos = np.asarray(_last_movable_world_pos, dtype=float).reshape(3).copy()
-        else:
+        _mv_top_z = None
+        # ── G1: 优先按 movable token 在场景中查真实物体几何 ────────────────
+        # EE-mode 下 _last_movable_world_pos 记录的是 EE 自身位置，直接拿它
+        # 当抓取目标会在空处闭爪（open_amount=0.000）。所以先做真实物体解析，
+        # 同时取出 AABB 顶面高度用于决定下降高度。
+        if _mn_tok and _mn_tok not in ('ee', 'gripper'):
+          # ── 优先：按真实物体名直接问 CoppeliaSim 要世界 AABB 中心/顶面 ────
+          # 语义名扫描（get_3d_obs_by_name）在 headless 下会把 'meat' 一律解析到
+          # 先注册的 'chicken'，与本 episode 真实目标 'steak' 偏差可达 0.147m；
+          # 这里用真实名解析，直接消除目标错配。
           try:
-            _obj_names = self._env.get_object_names()
-            for _on in _obj_names:
-              _on_l = _on.lower()
-              if _mn_tok and _mn_tok in _on_l:
-                _mobs = self._env.get_3d_obs_by_name(_on)
-                if _mobs is not None:
-                  try: _mv_pos = np.asarray(_mobs['_position_world'], dtype=float).reshape(3).copy()
-                  except Exception:
-                    try: _mv_pos = np.asarray(_mobs['position'], dtype=float).reshape(3).copy()
-                    except Exception: pass
-                  if _mv_pos is not None:
-                    print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: detected movable "{_on}" at pos={_mv_pos.round(3)} via scene scan{bcolors.ENDC}')
-                    break
+            _rp_f2, _rtz_f2 = self._env.get_object_pos_by_name(_mn_tok)
+          except Exception:
+            _rp_f2, _rtz_f2 = None, None
+          if _rp_f2 is not None:
+            _mv_pos = np.asarray(_rp_f2, dtype=float).reshape(3).copy()
+            _mv_top_z = float(_rtz_f2) if _rtz_f2 is not None else float(_mv_pos[2])
+            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: resolved movable "{_mn_tok}" real center={_mv_pos.round(3)} top_z={_mv_top_z:.3f} via real-name lookup{bcolors.ENDC}')
+        if _mv_pos is None and _mn_tok and _mn_tok not in ('ee', 'gripper'):
+          try:
+            import re as _re_f2
+            for _on in self._env.get_object_names():
+              _on_l = _on.lower().strip()
+              _on_tok = _on_l
+              if ' ' in _on_l: _on_tok = _on_l.split(' ')[-1]
+              elif '_' in _on_l: _on_tok = _on_l.split('_')[-1]
+              _mm_f2 = _re_f2.match(r'^(.*?)(\d+)$', _on_tok)
+              if _mm_f2: _on_tok = _mm_f2.group(1)
+              if _on_tok == _mn_tok or _mn_tok in _on_l:
+                try:
+                  _pc_f2, _ = self._env.get_3d_obs_by_name(_on)
+                  _pc_f2 = np.asarray(_pc_f2, dtype=float).reshape(-1, 3)
+                except Exception:
+                  _pc_f2 = None
+                if _pc_f2 is not None and _pc_f2.shape[0] > 0:
+                  _mv_pos = _pc_f2.mean(axis=0).copy()
+                  _mv_top_z = float(_pc_f2[:, 2].max())
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: resolved movable "{_on}" real center={_mv_pos.round(3)} top_z={_mv_top_z:.3f} via scene scan{bcolors.ENDC}')
+                  break
           except Exception:
             pass
+        # ── 退路：使用已保存的 movable 位置 ──────────────────────────────
+        if _mv_pos is None and _last_movable_world_pos is not None:
+          _mv_pos = np.asarray(_last_movable_world_pos, dtype=float).reshape(3).copy()
+          if _last_movable_top_z is not None:
+            _mv_top_z = float(_last_movable_top_z)
         if _mv_pos is not None:
           print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK: movable="{_last_movable_name}" (tok={_mn_tok}) grasped=0 → approach + grasp_with_retry{bcolors.ENDC}')
           try:
-            _ee_quat_now = self._env.get_ee_quat()
+            # 抓取朝向用 home(复位) 朝向：实测 waypoint1 朝向每 episode 随机，
+            # 会让 proximity 探测窗口消失；home 朝向窗口稳定。
+            _ee_quat_now = self._env.get_home_ee_quat()
             _ws_min_f = self._env.workspace_bounds_min + np.array([0.02, 0.02, 0.01])
             _ws_max_f = self._env.workspace_bounds_max - np.array([0.02, 0.02, 0.01])
-            # Step 1: 4cm above movable center
-            _approach = np.array([_mv_pos[0], _mv_pos[1], float(_mv_pos[2]) + 0.04], dtype=float)
-            _c = np.clip(_approach, _ws_min_f, _ws_max_f)
-            self._env.apply_action(np.concatenate([_c, _ee_quat_now, [1.0]]))
-            self._env.stabilize(steps=20)
-            # Step 2: descend to +1.5cm above movable
-            _descend = np.array([_mv_pos[0], _mv_pos[1], float(_mv_pos[2]) + 0.015], dtype=float)
-            _c2 = np.clip(_descend, _ws_min_f, _ws_max_f)
-            self._env.apply_action(np.concatenate([_c2, _ee_quat_now, [1.0]]))
-            self._env.stabilize(steps=15)
-            # Step 3: grasp_with_retry (push down 15mm × 3 tries)
-            _ok2, _cnt2 = self._env.grasp_with_retry(max_retry=3, stabilize_steps=25, push_down_m=0.015)
+            # 先在当前位姿张开夹爪，避免带着半闭手指接近物体
+            try:
+              self._env.apply_action(np.concatenate([np.array(self._env.get_ee_pos(), dtype=float), _ee_quat_now, [1.0]]))
+              self._env.stabilize(steps=10)
+            except Exception:
+              pass
+            # Step 1: 物体正上方 +4cm（夹爪张开）
+            #   先 apply_action 做粗定位（路径规划长距离移动），再用闭环小步修正残差
+            #   ——改为纯开环时实测终点残留 0.091m，夹爪会在物体旁空抓
+            #   （`Planning OK but EE 0.091m from target` → `attempt 1 empty`）。
+            _appr_z = (float(_mv_top_z) + 0.04) if _mv_top_z is not None else (float(_mv_pos[2]) + 0.04)
+            _approach = np.clip(np.array([_mv_pos[0], _mv_pos[1], _appr_z], dtype=float), _ws_min_f, _ws_max_f)
+            try:
+              self._env.apply_action(np.concatenate([_approach, _ee_quat_now, [1.0]]))
+              self._env.stabilize(steps=15)
+            except Exception:
+              pass
+            _ap_ok, _ap_err, _ap_it = self._env.move_ee_closed_loop(
+                _approach, target_quat=_ee_quat_now, tol=0.01, max_iters=120)
+            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: closed-loop approach ok={_ap_ok} err={_ap_err*1000:.1f}mm iters={_ap_it}{bcolors.ENDC}')
+            self._env.stabilize(steps=10)
+            # Step 2: 下降到夹取高度 = 探测窗口内、尽量浅的高度
+            #   proximity 探测窗口实测位于物体顶部附近（steak: tip.z ∈ [top_z-16.4mm,
+            #   top_z-1mm]）。取 top_z-3mm：既落在窗口内，又是窗口里最浅的高度，
+            #   IK 最易到位。若仍按物体「中心 z」下降，在部分 episode/XY 下 IK 到不了
+            #   （实测残差 21.7mm，tip 停在窗口上方 → 闭爪空抓）。
+            _desc_z = (float(_mv_top_z) - 0.003) if _mv_top_z is not None else float(_mv_pos[2])
+            _descend = np.clip(np.array([_mv_pos[0], _mv_pos[1], _desc_z], dtype=float), _ws_min_f, _ws_max_f)
+            # 探测窗口仅约 ±8mm（实测 steak tip.z ∈ [1.0479, 1.0633]），
+            # 下降容差必须收紧到 4mm，否则残差会把 EE 留在窗口外 → 闭爪空抓。
+            _de_ok, _de_err, _de_it = self._env.move_ee_closed_loop(
+                _descend, target_quat=_ee_quat_now, tol=0.004, max_iters=140)
+            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: closed-loop descend ok={_de_ok} err={_de_err*1000:.1f}mm iters={_de_it}{bcolors.ENDC}')
+            self._env.stabilize(steps=10)
+            # Step 3: grasp_with_retry（G2: 含闭环 XY 对准 + 夹爪开度校验）
+            _ok2, _cnt2 = self._env.grasp_with_retry(max_retry=3, stabilize_steps=25, push_down_m=0.015, target_pos=_mv_pos, top_z=_mv_top_z)
             print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK: grasp_with_retry ok={_ok2} cnt={_cnt2}{bcolors.ENDC}')
-            if _ok2 and _cnt2 > 0 and _last_target_center_world is not None:
-              # Step 4: lift 5cm + move horizontally toward affordance target
-              print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK: grasped, lift 5cm then move to target xy{bcolors.ENDC}')
+            if _ok2 and _cnt2 > 0:
+              # Step 4: 抬升 → 搬运到放置区 → 下放 → 释放。
+              # 旧实现只"抬 5cm + 朝 affordance 目标水平推"：既没有把物体送进任务的
+              # success 区域，也从未张开夹爪（物体一直挂在夹爪上）——因此即使抓到了正确
+              # 物体，env.success() 仍为 False。这里改为真正的放置：优先用任务 success
+              # 传感器位置作放置点，其次退回 affordance 目标。全程纯 IK，无传送。
+              print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK: grasped, lift then place to target region{bcolors.ENDC}')
               try:
-                _lp = np.array(self._env.get_ee_pos(), dtype=float)
-                _lift = np.array([_lp[0], _lp[1], float(_lp[2]) + 0.05], dtype=float)
-                _lc = np.clip(_lift, _ws_min_f, _ws_max_f)
-                self._env.apply_action(np.concatenate([_lc, _ee_quat_now, [0.0]]))
-                self._env.stabilize(steps=20)
-                _tgt = np.asarray(_last_target_center_world, dtype=float).reshape(3)
-                _dxy_t = float(np.linalg.norm(_tgt[:2] - _lc[:2]))
-                if _dxy_t > 0.04:
-                  self._env.horizontal_push_continuous(
-                      target_xy=np.array([_tgt[0], _tgt[1]], dtype=float),
-                      total_steps=25, gripper_action=None, clamp_z=float(_lc[2]),
-                  )
+                # ── 解析放置目标：任务 success 传感器优先 ──────────────────
+                _place = None
+                _place_src = ''
+                _sa = None
+                try:
+                  _task_obj = self._env.rlbench_env._scene.task
+                  _sensor = None
+                  for _sa in ('_success_sensor', '_success', '_success_sensor0'):
+                    _sensor = getattr(_task_obj, _sa, None)
+                    if _sensor is not None:
+                      break
+                  if _sensor is not None:
+                    _place = np.array(_sensor.get_position(), dtype=float).reshape(3)
+                    _place_src = f'task success sensor ({_sa})'
+                except Exception:
+                  _place = None
+                if _place is None and _last_target_center_world is not None:
+                  _place = np.asarray(_last_target_center_world, dtype=float).reshape(3)
+                  _place_src = 'affordance target'
+                if _place is not None:
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: place target via {_place_src} @ {_place.round(3)}{bcolors.ENDC}')
+                  # (a) 抬升 5cm（保持闭爪）避免拖动
+                  _lp = np.array(self._env.get_ee_pos(), dtype=float)
+                  _lift = np.clip(np.array([_lp[0], _lp[1], float(_lp[2]) + 0.05]), _ws_min_f, _ws_max_f)
+                  self._env.apply_action(np.concatenate([_lift, _ee_quat_now, [0.0]]))
+                  self._env.stabilize(steps=15)
+                  # (b) 闭环搬运到放置点上方
+                  _above = np.clip(np.array([_place[0], _place[1], _place[2] + 0.08]), _ws_min_f, _ws_max_f)
+                  self._env.apply_action(np.concatenate([_above, _ee_quat_now, [0.0]]))
+                  self._env.stabilize(steps=15)
+                  _mv_ok, _mv_err, _mv_it = self._env.move_ee_closed_loop(
+                      _above, target_quat=_ee_quat_now, tol=0.01, max_iters=140)
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: move-to-place ok={_mv_ok} err={_mv_err*1000:.1f}mm iters={_mv_it}{bcolors.ENDC}')
+                  self._env.stabilize(steps=10)
+                  # (c) 下放到放置高度：必须让被握物体尖端落入 success 传感器探测窗口
+                  #     （实测 steak tip.z 窗口 ∈ [1.048, 1.063]，传感器 z≈1.061）。
+                  #     旧代码用 _place[2]+0.03 释放过高 → 物体停在窗口之上 → Detected 失败。
+                  _drop = np.clip(np.array([_place[0], _place[1], _place[2] - 0.006]), _ws_min_f, _ws_max_f)
+                  _dr_ok, _dr_err, _dr_it = self._env.move_ee_closed_loop(
+                      _drop, target_quat=_ee_quat_now, tol=0.006, max_iters=120)
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: descend-to-place ok={_dr_ok} err={_dr_err*1000:.1f}mm iters={_dr_it} target_z={_drop[2]:.4f}{bcolors.ENDC}')
+                  self._env.stabilize(steps=10)
+                  # (d) 张开夹爪释放，并多稳定若干步让物体落定在传感器窗口内
+                  self._env.release_with_settle(stabilize_steps=35, lift_before_release=False)
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: placed & released at {_place.round(3)}{bcolors.ENDC}')
+                  # 诊断：释放后被握物体的实际停位与到传感器的距离，判定是否落入探测区
+                  try:
+                    _rp_after, _ = self._env.get_object_pos_by_name(_mn_tok)
+                    if _rp_after is not None:
+                      _pp = np.asarray(_rp_after, dtype=float).reshape(3)
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 diag: after release "{_mn_tok}" center={_pp.round(3)} sensor={_place.round(3)} d={np.linalg.norm(_pp-_place)*1000:.0f}mm env_done={self._env.success()}{bcolors.ENDC}')
+                  except Exception:
+                    pass
               except Exception as _pke:
-                print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 PICK lift/move raised: {_pke}{bcolors.ENDC}')
+                print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 PICK place raised: {_pke}{bcolors.ENDC}')
             elif not _ok2:
               # Grasp failed → try horizontal push to knock meat off grill
               print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 PICK FALLBACK: grasp failed → horizontal push to knock "{_mn_tok}" off surface{bcolors.ENDC}')
@@ -1050,7 +1258,7 @@ class LMP_interface():
             # follow EE during horizontal push; without this, EE just slides
             # past block without moving it)
             try:
-              _ok_grasp, _ = self._env.grasp_with_retry(max_retry=2, stabilize_steps=15, push_down_m=0.005)
+              _ok_grasp, _ = self._env.grasp_with_retry(max_retry=2, stabilize_steps=15, push_down_m=0.005, target_pos=_last_movable_world_pos)
               print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3: grasp_with_retry result={_ok_grasp}{bcolors.ENDC}')
             except Exception as _ge:
               print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3: grasp_with_retry raised: {_ge}{bcolors.ENDC}')
@@ -1072,11 +1280,20 @@ class LMP_interface():
         else:
           print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3 SLIDE: skipped (ee_cur={_ee_cur is not None}, slide_tgt={_slide_tgt_xy is not None}){bcolors.ENDC}')
       elif _intend_close:
-        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: intend CLOSE (gripper={float(gripper_state):.2f}); running grasp_with_retry{bcolors.ENDC}')
-        try:
-          _ok, _cnt = self._env.grasp_with_retry(max_retry=3, stabilize_steps=25, push_down_m=0.015)
-        except Exception as _gre:
-          print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] grasp_with_retry raised: {_gre}{bcolors.ENDC}')
+        # Pickable 任务禁止按"EE 当前位姿"盲目闭爪：LLM 生成的 affordance 常落在
+        # 语义泛称物体上（如 'a point at the center of the meat' → headless 下解析到
+        # 先注册的 chicken），盲目闭爪会在 Fix2 用真实名解析纠正目标之前，先 grasp 到
+        # 错误物体（实测 MeatOffGrill var1：steak 任务却先抓到 chicken）。
+        # 这类任务统一交给上面的 Fix2（真实名解析 + 接近 + 下降 + 抓取）。
+        # 若此处已握有物体（_grasped_before>0）则更不能在任意位姿再闭爪去抓第二个物体。
+        if _is_pickable:
+          print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: intend CLOSE on pickable task → skip blind close (handled by Fix2 real-name pick; holding={_grasped_before}){bcolors.ENDC}')
+        else:
+          print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: intend CLOSE (gripper={float(gripper_state):.2f}); running grasp_with_retry{bcolors.ENDC}')
+          try:
+            _ok, _cnt = self._env.grasp_with_retry(max_retry=3, stabilize_steps=25, push_down_m=0.015)
+          except Exception as _gre:
+            print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] grasp_with_retry raised: {_gre}{bcolors.ENDC}')
       elif _intend_open and _grasped_before > 0:
         print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Post-action: intend OPEN (gripper={float(gripper_state):.2f}) while holding {_grasped_before} objects; running release_with_settle{bcolors.ENDC}')
         try:

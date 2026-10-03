@@ -334,7 +334,7 @@ class LMP:
                     'try:',
                     '    _q_clean = (query or "").strip().lower()',
                     '    # Strip common verbs + articles',
-                    '    _q_stripped = _re_fb.sub(r"^(push|press|turn|move|slide|take|pick|place|put|grasp|grab|lift|off|on|open|close|reach|get|set|turn off|switch off|toggle)[ ]+(the |a |an )?", "", _q_clean)',
+                    '    _q_stripped = _re_fb.sub(r"^(stack|unstack|pick up|lift up|place on|put on|turn off|switch off|push|press|turn|move|slide|take|pick|place|put|grasp|grab|lift|off|on|open|close|reach|get|set|toggle)[ ]+(the |a |an )?", "", _q_clean)',
                     '    _noun = _q_stripped.strip() or "button"',
                     '    print("[LMP fb] noun candidate:", _noun)',
                     '    movable = None',

@@ -1182,6 +1182,130 @@ class VoxPoserRLBench():
         obj_normals = np.asarray(pcd_downsampled.normals)
         return obj_points, obj_normals
 
+    def get_object_pos_by_name(self, name):
+        """
+        按 RLBench 场景真实物体名解析世界坐标（世界 AABB 中心 + 顶面高度）。
+
+        为什么需要它：`get_3d_obs_by_name` 依赖 VoxPoser 的语义 name2ids，headless 下
+        常把 'meat' 一律映射到先注册的 'chicken'，导致抓取目标与 episode 真实目标
+        （'steak'）偏差可达 0.15m。本方法直接向 CoppeliaSim 要真实物体位姿，
+        供 Fix2 精确定位抓取目标，并给出可安全下降的顶面高度。
+
+        Args:
+            name (str): RLBench 物体名（如 'steak'/'chicken'），大小写不敏感，支持包含匹配。
+
+        Returns:
+            (center, top_z): center 为世界 AABB 中心 (3,) ndarray，top_z 为顶面 z；
+                             未命中时返回 (None, None)。
+        """
+        if not name:
+            return None, None
+        _q = str(name).strip().lower()
+        if not _q:
+            return None, None
+
+        # 收集候选 (真实名, handle)：优先 RLBench 可抓取对象，再遍历场景树
+        _cands = []
+        try:
+            _scene = self.rlbench_env._scene
+        except Exception:
+            _scene = None
+        if _scene is not None:
+            try:
+                for _o in _scene.task.get_graspable_objects():
+                    try:
+                        _cands.append((_o.get_name(), _o.get_handle()))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if not _cands:
+            try:
+                from pyrep.backend import sim
+                _root = sim.simGetSceneRoot()
+                if _root > 0:
+                    for _h in sim.simGetObjectsInTree(_root) or []:
+                        try:
+                            _cands.append((sim.simGetObjectName(_h), _h))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # 精确匹配优先，其次包含匹配
+        _hit = None
+        for _n, _h in _cands:
+            if str(_n).strip().lower() == _q:
+                _hit = _h
+                break
+        if _hit is None:
+            for _n, _h in _cands:
+                _nl = str(_n).strip().lower()
+                if _nl and (_q in _nl or _nl in _q):
+                    _hit = _h
+                    break
+        # 语义泛称消歧：'meat'/'food' 在场景里对应多个具体物体
+        # （MeatOffGrill: chicken/steak），按本 episode 指令点名者优先。
+        if _hit is None:
+            _ALIAS = {
+                'meat': ('steak', 'chicken', 'beef', 'pork', 'fish', 'lamb'),
+                'food': ('steak', 'chicken', 'beef', 'pork', 'fish', 'lamb'),
+            }
+            _alias_names = _ALIAS.get(_q)
+            if _alias_names:
+                _instr = ''
+                try:
+                    _instr = str(getattr(self, 'current_instruction', '') or '').lower()
+                except Exception:
+                    _instr = ''
+                _group = []
+                for _n, _h in _cands:
+                    _nl = str(_n).strip().lower()
+                    if any(_a in _nl for _a in _alias_names):
+                        _group.append((_nl, _h))
+                if _group:
+                    _named = [(nl, h) for nl, h in _group
+                              if any(_a in _instr for _a in _alias_names if _a in nl)]
+                    _hit = (_named or sorted(_group, key=lambda x: x[0]))[0][1]
+        if _hit is None:
+            return None, None
+
+        # 世界 AABB：把局部 8 顶点用位姿矩阵变换到世界坐标。
+        # 注意：不能用 pyrep 的基类 Object(_hit) —— 它的 __init__ 会调用
+        # _get_requested_type()（基类直接 raise NotImplementedError），必然抛错。
+        # 这里直接调 CoppeliaSim 后端接口，避免类型包装问题。
+        try:
+            from pyrep.backend import sim
+            _bb_params = [sim.sim_objfloatparam_objbbox_min_x,
+                          sim.sim_objfloatparam_objbbox_max_x,
+                          sim.sim_objfloatparam_objbbox_min_y,
+                          sim.sim_objfloatparam_objbbox_max_y,
+                          sim.sim_objfloatparam_objbbox_min_z,
+                          sim.sim_objfloatparam_objbbox_max_z]
+            _bb = [float(sim.simGetObjectFloatParameter(_hit, p)) for p in _bb_params]
+            _lmin = np.array([_bb[0], _bb[2], _bb[4]], dtype=float)
+            _lmax = np.array([_bb[1], _bb[3], _bb[5]], dtype=float)
+            _corners = np.array([
+                [_lmin[0], _lmin[1], _lmin[2]], [_lmax[0], _lmin[1], _lmin[2]],
+                [_lmin[0], _lmax[1], _lmin[2]], [_lmax[0], _lmax[1], _lmin[2]],
+                [_lmin[0], _lmin[1], _lmax[2]], [_lmax[0], _lmin[1], _lmax[2]],
+                [_lmin[0], _lmax[1], _lmax[2]], [_lmax[0], _lmax[1], _lmax[2]],
+            ], dtype=float)
+            _m = np.array(sim.simGetObjectMatrix(_hit, -1), dtype=float).reshape(3, 4)
+            _world = (_m[:, :3] @ _corners.T).T + _m[:, 3]
+            _wmin = _world.min(axis=0)
+            _wmax = _world.max(axis=0)
+            center = (_wmin + _wmax) / 2.0
+            return center, float(_wmax[2])
+        except Exception:
+            try:
+                from pyrep.backend import sim
+                _pos = np.array(sim.simGetObjectPosition(_hit, -1),
+                                dtype=float).reshape(3)
+                return _pos, float(_pos[2])
+            except Exception:
+                return None, None
+
     def get_scene_3d_obs(self, ignore_robot=False, ignore_grasped_obj=False):
         """
         Retrieves the entire scene's 3D point cloud observations and colors.
@@ -1373,9 +1497,23 @@ class VoxPoserRLBench():
             try:
                 self.task.sample_variation()
                 descriptions, obs = self.task.reset()
+                # R4 支持：保存当前 episode 的自然语言指令，供 interfaces.execute()
+                # 按动词判定歧义物体类别（block → 抓取 or 滑动）。
+                try:
+                    self.current_instruction = str(descriptions[0]) if descriptions else ''
+                except Exception:
+                    self.current_instruction = ''
                 obs = self._process_obs(obs)
                 self.init_obs = obs
                 self.latest_obs = obs
+                # 记录本 episode 的 home(复位) 末端朝向 (w,x,y,z)。
+                # 实测：用 waypoint1 朝向抓取时 proximity 探测窗口不稳定
+                # （每 episode 随机），而 home 朝向给出稳定窗口
+                # （MeatOffGrill steak: tip.z ∈ [1.0479, 1.0633]）。
+                try:
+                    self._home_ee_quat = np.array(obs.gripper_pose[3:], dtype=float).reshape(4).copy()
+                except Exception:
+                    self._home_ee_quat = None
                 self._update_visualizer()
                 if attempt > 0:
                     print(f'[VoxPoserRLBench] Reset succeeded on attempt {attempt + 1}')
@@ -1501,6 +1639,16 @@ class VoxPoserRLBench():
 
     def get_ee_quat(self):
         return self.get_ee_pose()[3:]
+
+    def get_home_ee_quat(self):
+        """返回本 episode reset 时的 home 末端朝向 (w,x,y,z)。
+
+        抓取时使用 home 朝向可获得稳定的 proximity 探测窗口；若未记录则退回当前朝向。
+        """
+        _q = getattr(self, '_home_ee_quat', None)
+        if _q is None:
+            return self.get_ee_quat()
+        return np.array(_q, dtype=float).reshape(4)
 
     def get_last_gripper_action(self):
         """
@@ -1747,60 +1895,350 @@ class VoxPoserRLBench():
                 except Exception:
                     break
 
-    def grasp_with_retry(self, max_retry=3, stabilize_steps=25, push_down_m=0.015):
+    @staticmethod
+    def _quat_wxyz_to_xyzw(q):
+        """RLBench 观测/动作里的四元数是 (w,x,y,z)；PyRep 的 IK 接口
+        （solve_ik_via_jacobian / solve_ik_via_sampling / Object.set_quaternion、
+        Object.set_pose）用的是 (x,y,z,w)。两者混用会把"保持当前朝向"变成一个
+        完全不同的旋转目标 → IK 必然失败（实测 jacobian 报 'distance too large'、
+        sampling 报 'Could not find a valid joint configuration'，垂直下探 6mm/步
+        40 步全败）。
         """
-        在当前 EE 位置尝试闭合夹爪抓取：
-        - close gripper + stabilize
-        - 检查 grasped_objects；若为空，再往下推 push_down_m 后重闭合
-        - 最多重试 max_retry 次
+        a = np.asarray(q, dtype=float).reshape(4)
+        return np.array([a[1], a[2], a[3], a[0]], dtype=float)
 
-        Returns: (success: bool, final_grasped_count: int)
+    def move_ee_closed_loop(self, target_pos, target_quat=None, tol=0.01,
+                            step_m=0.006, max_iters=120):
         """
-        for attempt in range(max_retry):
-            # Step 1: 闭合夹爪 + 稳定
+        闭环把 EE 移到 target_pos（世界系 3D）。
+
+        动机：Fix2 的接近/下降原先走 apply_action（OMPL 路径规划），headless 下终点
+        常残留 ~0.09m 误差且不做校正，夹爪于是在物体旁 9cm 处闭爪 → 空抓
+        （日志 `Planning OK but EE 0.091m from target; will retry/fallback` →
+        `grasp_with_retry: attempt 1 empty (open_amount=0.000)`）。
+
+        这里改用已验证收敛的 `_solve_ik_and_step_once` 做小步推进，每步读真实 tip
+        位置判定，形成真正的闭环。步长必须足够小（实测 2cm/步会触发 IK 分支翻转被
+        回滚，EE 原地不动；≤6mm/步才稳定），与 horizontal_push_continuous 同量级。
+
+        :return: (是否达到 tol, 最终 EE 位置误差 m, 完成的迭代数)
+        """
+        try:
+            # 与 press_down_continuous / horizontal_push_continuous 取法一致
+            scene = self.rlbench_env._scene
+            arm = scene.robot.arm
+            # NOTE: 这里必须用 arm.get_tip()（与 VoxPoser 的 EE 帧、以及 IK 求解
+            # 的 TCP 帧一致）。若改取 gripper._tip_link，测量帧与 IK 帧会差一个
+            # 常量偏移，导致 IK 目标落到不可达处 → solved=False、EE 原地不动。
+            tip = arm.get_tip()
+            n_joints = len(arm.get_joint_positions())
+        except Exception as _e:
+            print('[rlbench_env.py] move_ee_closed_loop: env access err %s' % _e)
+            return False, float('inf'), 0
+        tgt = np.asarray(target_pos, dtype=float).reshape(3)
+        if target_quat is None:
+            # 用 tip 的实时朝向（PyRep 给的是 xyzw）转回观测/动作用的 wxyz，
+            # 统一在 _solve_ik_and_step_once 入口再转成 xyzw。
             try:
-                ee_pose_now = np.array(self.get_ee_pose(), dtype=float).copy()
-                close_act = np.concatenate([ee_pose_now, [0.0]])
-                self.apply_action(close_act)
+                _q = np.array(tip.get_quaternion(), dtype=float).reshape(4)
+                quat = np.array([_q[3], _q[0], _q[1], _q[2]], dtype=float)
             except Exception:
+                quat = np.array([1.0, 0.0, 0.0, 0.0])
+        else:
+            quat = np.asarray(target_quat, dtype=float).reshape(4)
+        best_err = float('inf')
+        stall = 0
+        iters = 0
+        for it in range(max_iters):
+            iters = it + 1
+            try:
+                cur = np.array(tip.get_position(), dtype=float).reshape(3)
+            except Exception:
+                break
+            err = float(np.linalg.norm(cur - tgt))
+            if err <= tol:
+                return True, err, iters
+            if err < best_err - 1e-4:
+                best_err = err
+                stall = 0
+            else:
+                stall += 1
+                # 接触受阻/力控关节滞后时 EE 会暂时不动，多给几次机会再判定停滞
+                if stall >= 6:
+                    break
+            d = tgt - cur
+            sub = cur + d / err * min(step_m, err)
+            try:
+                _jb = np.asarray(arm.get_joint_positions(), dtype=float).copy()
+            except Exception:
+                _jb = None
+            try:
+                _solved, _applied, _ee_step = self._solve_ik_and_step_once(
+                    scene=scene, arm=arm, tip=tip,
+                    target_pos=sub, target_quat=quat,
+                    n_joints_known=n_joints,
+                    _joints_before=_jb, _ee_before=cur,
+                    ee_start_xy=None,
+                    max_joint_jump_rad=2.5, max_xy_drift_m=0.15,
+                )
+            except Exception as _se:
+                print('[rlbench_env.py] move_ee_closed_loop: ik step err %s' % _se)
+                break
+            if not (_applied and _ee_step is not None):
+                print('[rlbench_env.py] move_ee_closed_loop iter %d: IK not applied (solved=%s, err=%.1fmm)' %
+                      (it, _solved, err * 1000))
+        return False, best_err, iters
+
+    def _refresh_obs(self):
+        """只读地刷新 latest_obs（不施加任何动作，因此不会移动机械臂）。"""
+        try:
+            self.latest_obs = self._process_obs(self.task.get_observation())
+        except Exception:
+            pass
+
+    def _direct_close_gripper(self, extra_steps=0, velocity=0.2, max_loops=400):
+        """直接闭爪（复刻 RLBench `Discrete.action` 的闭爪分支），但**不移动机械臂**。
+
+        为什么要绕过 `apply_action`：`MoveArmThenGripper` 先执行 arm 动作再执行夹爪动作，
+        而 headless 下 RLBench 的规划终点残留 ~0.07–0.10m（`Planning OK but EE 0.0xx m
+        from target`）——EE 在闭爪前已被挪走，闭爪时物体已不在夹爪 proximity 传感器
+        体积内，于是 `_grasped_objects` 为空。实测同一位姿下：
+          - `apply_action([pose, 0.0])` → grasped=0，且 tip 从 [0.127,0.058,1.052] 被挪到
+            [0.126,0.059,1.046]/home 附近；
+          - 直接闭爪 → grasped=1 ['steak']。
+        抓取判定仍是 RLBench 原生机制（`gripper.grasp()` 依据 `_proximity_sensor`），
+        没有任何传送或成功判定覆盖。
+
+        :return: (被探测到的物体名列表, 夹爪是否到位)
+        """
+        try:
+            scene = self.rlbench_env._scene
+            gripper = scene.robot.gripper
+            prox = gripper._proximity_sensor
+        except Exception as _e:
+            print('[rlbench_env.py] _direct_close_gripper: env access err %s' % _e)
+            return [], False
+        try:
+            objs = list(scene.task.get_graspable_objects())
+        except Exception:
+            objs = []
+        detected = []
+        for o in objs:
+            try:
+                if prox.is_detected(o):
+                    detected.append(o.get_name())
+                    gripper.grasp(o)
+            except Exception:
+                pass
+        done, n = False, 0
+        while not done and n < max_loops:
+            try:
+                done = gripper.actuate(0.0, velocity=velocity)
+            except Exception:
+                break
+            try: scene.pyrep.step()
+            except Exception: pass
+            try: scene.task.step()
+            except Exception: pass
+            n += 1
+        for _ in range(max(0, int(extra_steps))):
+            try: scene.pyrep.step()
+            except Exception: break
+        self._refresh_obs()
+        return detected, bool(done)
+
+    def _direct_open_gripper(self, velocity=0.2, max_loops=400):
+        """直接开爪（并 release 已 attach 的物体），不移动机械臂。"""
+        try:
+            scene = self.rlbench_env._scene
+            gripper = scene.robot.gripper
+        except Exception:
+            return False
+        try:
+            gripper.release()
+        except Exception:
+            pass
+        done, n = False, 0
+        while not done and n < max_loops:
+            try:
+                done = gripper.actuate(1.0, velocity=velocity)
+            except Exception:
+                break
+            try: scene.pyrep.step()
+            except Exception: pass
+            try: scene.task.step()
+            except Exception: pass
+            n += 1
+        self._refresh_obs()
+        return bool(done)
+
+    def _search_grasp_by_scan(self, center, quat_base, target_pos=None,
+                              z_offsets=(-0.001, -0.005, -0.009, -0.013, -0.017),
+                              yaw_offsets_deg=(0.0, 45.0, -45.0, 90.0, -90.0)):
+        """在目标顶部附近做 (yaw × z) 网格搜索式抓取，命中即返回。
+
+        `center` 的 z 应当传入**物体顶面高度**（调用方以 top_z 作锚点）。探测窗口实测
+        位于顶部附近（steak: tip.z ∈ [top_z-16.4mm, top_z-1mm]），默认 z_offsets 从
+        top_z-1mm 逐渐下探到 top_z-17mm，正好覆盖该窗口；越浅越容易被 IK 到位，因此
+        从浅往深扫、命中即停。
+
+        为什么需要它：`_proximity_sensor` 的探测窗口也依赖夹爪 yaw 与物体 yaw 的相对
+        姿态。固定「home 朝向 + 单一高度」在部分 episode 会漏抓。这里对 yaw 与 z 做有界
+        网格搜索：每个候选位姿用闭环 IK 到位后直接闭爪，命中立即返回。
+
+        全程纯 IK（`move_ee_closed_loop`），无传送；判定仍是 RLBench 原生
+        `gripper.grasp()`/`get_grasped_objects()`。
+
+        :return: (ok: bool, count: int, hits: list)
+        """
+        try:
+            import transforms3d.quaternions as _tq
+        except Exception:
+            _tq = None
+        _c = np.asarray(center, dtype=float).reshape(3)
+        _q0 = np.asarray(quat_base, dtype=float).reshape(4)
+        _ws_min = self.workspace_bounds_min + np.array([0.02, 0.02, 0.01])
+        _ws_max = self.workspace_bounds_max - np.array([0.02, 0.02, 0.01])
+        _hits = []
+        for _yaw in yaw_offsets_deg:
+            if _tq is not None and abs(float(_yaw)) > 1e-6:
+                _qz = _tq.axangle2quat([0.0, 0.0, 1.0], np.deg2rad(float(_yaw)))
+                _q = np.array(_tq.qmult(_qz, _q0), dtype=float)
+            else:
+                _q = _q0.copy()
+            for _dz in z_offsets:
+                _tgt = np.clip(np.array([_c[0], _c[1], float(_c[2]) + float(_dz)]),
+                               _ws_min, _ws_max)
                 try:
-                    self.close_gripper()
+                    self._direct_open_gripper()
+                    _ok_mv, _err_mv, _it_mv = self.move_ee_closed_loop(
+                        _tgt, target_quat=_q, tol=0.004, max_iters=90)
+                    if (not _ok_mv) and _err_mv > 0.008:
+                        continue
+                    _det, _done = self._direct_close_gripper(extra_steps=15)
+                except Exception as _e:
+                    print('[rlbench_env.py] _search_grasp_by_scan: step err %s' % _e)
+                    continue
+                try:
+                    _cnt = int(self.get_grasped_object_count())
+                except Exception:
+                    _cnt = 0
+                _oa = 0.0
+                try:
+                    _oa = float(self.get_gripper_open_amount())
                 except Exception:
                     pass
-            self.stabilize(steps=stabilize_steps)
-            cnt = self.get_grasped_object_count()
-            if cnt > 0:
-                print('[rlbench_env.py] grasp_with_retry: grasped %d objects on attempt %d' % (cnt, attempt+1))
-                return True, cnt
-            # Step 2: 重试 - 先张开一点点，下移 push_down_m，再闭合
-            print('[rlbench_env.py] grasp_with_retry: attempt %d empty (open_amount=%.3f); pushing down %.1fmm then reclosing' %
-                  (attempt+1, self.get_gripper_open_amount(), push_down_m*1000))
+                print('[rlbench_env.py] _search_grasp_by_scan: yaw=%+.0f dz=%+.3f err=%.1fmm det=%s open=%.3f cnt=%d' %
+                      (_yaw, _dz, _err_mv * 1000, _det, _oa, _cnt))
+                if _cnt > 0 or _oa > 0.02:
+                    _hits.append((_yaw, _dz, _det, _cnt, _oa))
+                    if target_pos is None or _cnt > 0:
+                        return True, max(_cnt, 1), _hits
+        return (len(_hits) > 0), (max([h[3] for h in _hits]) if _hits else 0), _hits
+
+    def grasp_with_retry(self, max_retry=3, stabilize_steps=25, push_down_m=0.015,
+                         target_pos=None, top_z=None):
+        """
+        在当前 EE 位置尝试闭合夹爪抓取：
+        - （可选）闭爪前先按 target_pos 做 XY 对准，使夹爪位于物体正上方
+        - close gripper + stabilize
+        - 检查 grasped_objects 与夹爪开度；若为空，再往下推 push_down_m 后重闭合
+        - 最多重试 max_retry 次
+
+        Args:
+          target_pos: 物体世界坐标 [x, y, z]（可选）。给出时，闭爪前把 EE 的 XY
+                      对准到该位置，避免在物体旁边/上方空抓。
+          top_z: 物体顶面世界高度（可选）。给出时，扫描兜底以它为 z 锚点（探测窗口在
+                 顶部附近），而非物体中心 z。
+        Returns: (success: bool, final_grasped_count: int)
+        """
+        def _grasp_confirmed():
+            """count>0（物理抓取约束）或 夹爪开度>0.02（手指间有物）都算夹住。"""
             try:
-                ee_pose_now = np.array(self.get_ee_pose(), dtype=float).copy()
-                # 微张开 20% 以便手指在物体两侧正确合拢
-                open_act = np.concatenate([ee_pose_now, [0.5]])
-                self.apply_action(open_act)
-                self.stabilize(steps=8)
-                # 下压 push_down_m（夹爪保持半开）
-                target = ee_pose_now.copy()
-                target[2] -= push_down_m
-                down_act = np.concatenate([target, [0.5]])
-                self.apply_action(down_act)
-                self.stabilize(steps=8)
-                # 再次闭合
-                reclosing = np.concatenate([target, [0.0]])
-                self.apply_action(reclosing)
-                self.stabilize(steps=stabilize_steps + 10)
+                _c = int(self.get_grasped_object_count())
+            except Exception:
+                _c = 0
+            if _c > 0:
+                return True, _c
+            try:
+                _oa = float(self.get_gripper_open_amount())
+            except Exception:
+                _oa = 0.0
+            if _oa > 0.02:
+                return True, max(_c, 1)
+            return False, _c
+
+        # Step 0: XY 对准（仅当显式给了目标位置）
+        if target_pos is not None:
+            try:
+                _tp = np.asarray(target_pos, dtype=float).reshape(3)
+                _ee0 = np.array(self.get_ee_pose(), dtype=float).copy()
+                _dxy0 = float(np.hypot(_ee0[0] - _tp[0], _ee0[1] - _tp[1]))
+                if _dxy0 > 0.005:
+                    # 粗定位：apply_action 路径规划（夹爪张开，避免半闭状态拖拽物体）
+                    try:
+                        _al = _ee0.copy()
+                        _al[0], _al[1] = float(_tp[0]), float(_tp[1])
+                        self.apply_action(np.concatenate([_al, [1.0]]))
+                        self.stabilize(steps=10)
+                    except Exception:
+                        pass
+                    # 精修正：路径规划终点常残留数厘米（实测 0.091m），用闭环小步
+                    # 把 EE 真正挪到物体正上方，否则会在物体旁边空抓。
+                    _xy_tgt = np.array([_tp[0], _tp[1], _ee0[2]], dtype=float)
+                    _al_ok, _al_err, _al_it = self.move_ee_closed_loop(
+                        _xy_tgt, tol=0.01, max_iters=120)
+                    print('[rlbench_env.py] grasp_with_retry: XY-align closed-loop ok=%s err=%.1fmm (was %.1fmm off) iters=%d' %
+                          (_al_ok, _al_err * 1000, _dxy0 * 1000, _al_it))
+            except Exception as _ae:
+                print('[rlbench_env.py] grasp_with_retry: XY-align failed: %s' % _ae)
+
+        for attempt in range(max_retry):
+            # Step 1: 直接闭爪（绕过 arm 动作模式，避免 EE 被规划器挪走）
+            _det, _done = self._direct_close_gripper(extra_steps=int(stabilize_steps))
+            print('[rlbench_env.py] grasp_with_retry: attempt %d direct-close detected=%s done=%s open=%s' %
+                  (attempt + 1, _det, _done, self.get_gripper_open_amount()))
+            _ok, cnt = _grasp_confirmed()
+            if _ok:
+                print('[rlbench_env.py] grasp_with_retry: grasped %d objects on attempt %d' %
+                      (cnt, attempt + 1))
+                return True, cnt
+            if attempt + 1 >= max_retry:
+                break
+            # Step 2: 重试 —— 直接开爪 → 闭环 IK 下压 push_down_m → 再直接闭爪
+            print('[rlbench_env.py] grasp_with_retry: attempt %d empty; pushing down %.1fmm then reclosing' %
+                  (attempt + 1, push_down_m * 1000))
+            try:
+                self._direct_open_gripper()
+                _down = np.array(self.get_ee_pos(), dtype=float).reshape(3).copy()
+                _down[2] -= push_down_m
+                # 探测窗口在物体顶部附近（约 [top_z-16mm, top_z-1mm]）；继续深压只会
+                # 越出窗口且更难被 IK 到位，故下压高度以 top_z-17mm 为下界。
+                if top_z is not None:
+                    _down[2] = max(_down[2], float(top_z) - 0.017)
+                self.move_ee_closed_loop(_down, tol=0.004, max_iters=60)
             except Exception as _ge:
                 print('[rlbench_env.py] grasp_with_retry: exception in retry: %s' % _ge)
-            cnt = self.get_grasped_object_count()
-            if cnt > 0:
-                print('[rlbench_env.py] grasp_with_retry: grasped %d objects after push-down retry' % cnt)
-                return True, cnt
             push_down_m += 0.005  # 下次重试再深 5mm
-        cnt = self.get_grasped_object_count()
+        # Step 3: (yaw × z) 网格搜索兜底 —— 探测窗口会随朝向/高度漂移，
+        # 固定位姿漏抓时用有界搜索找回；纯 IK，判定仍是原生 grasp。
+        try:
+            _c0 = (np.asarray(target_pos, dtype=float).reshape(3) if target_pos is not None
+                   else np.array(self.get_ee_pos(), dtype=float).reshape(3))
+            # z 锚点用物体顶面（探测窗口在顶部附近）；无 top_z 时退回中心 z。
+            if top_z is not None:
+                _c0 = np.array([_c0[0], _c0[1], float(top_z)], dtype=float)
+            _s_ok, _s_cnt, _s_hits = self._search_grasp_by_scan(
+                _c0, self.get_home_ee_quat(), target_pos=target_pos)
+            print('[rlbench_env.py] grasp_with_retry: scan-search ok=%s cnt=%s hits=%s' %
+                  (_s_ok, _s_cnt, _s_hits))
+            if _s_ok:
+                return True, _s_cnt
+        except Exception as _se:
+            print('[rlbench_env.py] grasp_with_retry: scan-search err %s' % _se)
+        _ok, cnt = _grasp_confirmed()
         print('[rlbench_env.py] grasp_with_retry: FAILED after %d attempts; count=%d' % (max_retry, cnt))
-        return (cnt > 0), cnt
+        return _ok, cnt
 
     def release_with_settle(self, stabilize_steps=20, lift_before_release=False):
         """
@@ -1872,7 +2310,10 @@ class VoxPoserRLBench():
         """
         import numpy as _np
         target_pos = np.asarray(target_pos, dtype=float).reshape(3)
-        target_quat = np.asarray(target_quat, dtype=float).reshape(4)
+        # NOTE: 调用方给的 target_quat 是 RLBench 观测/动作的 wxyz 顺序（都来自
+        # get_ee_quat()）；PyRep 的 IK 接口要 xyzw。这里统一转换，避免"保持当前朝向"
+        # 被当成一个完全不同的旋转目标 → IK 全败。
+        target_quat = self._quat_wxyz_to_xyzw(target_quat)
         try:
             n_joints = len(arm.get_joint_positions())
         except Exception:
@@ -1951,43 +2392,9 @@ class VoxPoserRLBench():
                     break
             except Exception:
                 solved = None
-        # Chain B: without orientation (in case orientation is unreachable)
-        if solved is None and hasattr(arm, 'solve_ik_via_sampling'):
-            try:
-                if _joints_before is not None:
-                    _cur_j = np.asarray(_joints_before, dtype=float).reshape(-1)
-                    _nj = len(_cur_j)
-                    _best_s = None
-                    _best_c = float('inf')
-                    for _st in range(10):
-                        _sg = None
-                        try:
-                            _sg = arm.solve_ik_via_sampling(target_pos.tolist(), quaternion=None, ignore_collisions=True)
-                        except Exception:
-                            _sg = None
-                        if _sg is None:
-                            continue
-                        _sfl = np.asarray(_sg, dtype=float).reshape(-1)[:_nj]
-                        if _sfl.size < _nj:
-                            continue
-                        _c = float(np.sum(np.abs(_sfl - _cur_j)))
-                        if _c < _best_c:
-                            _best_c = _c
-                            _best_s = _sfl.copy()
-                            if _c < 0.3:
-                                break
-                    if _best_s is not None:
-                        s_flat = np.asarray(_best_s.tolist(), dtype=float).reshape(-1)
-                        if s_flat.size >= n_joints:
-                            solved = s_flat[:n_joints].tolist()
-                else:
-                    got = arm.solve_ik_via_sampling(target_pos.tolist(), quaternion=None, ignore_collisions=True)
-                    if got is not None:
-                        s_flat = np.asarray(got, dtype=float).reshape(-1)
-                        if s_flat.size >= n_joints:
-                            solved = s_flat[:n_joints].tolist()
-            except Exception:
-                solved = None
+        # Chain B（原"放开朝向"兜底）已删除：solve_ik_via_sampling 要求 euler/quaternion
+        # 恰有一个非 None，传 quaternion=None 必然抛 ConfigurationError 被静默吞掉，
+        # 从来没能提供任何解。朝向约束不可达的情形由 Chain A 的 xyzw 四元数正确性解决。
         # Chain C: _ik_target Dummy (internal CoppeliaSim Jacobian IK — deterministic, no flips;
         # works extremely well for TINY EE delta steps like press_cont's 0.8mm/step).
         # This is what scheme 2 fallback uses reliably. We apply it, read back joints, and
