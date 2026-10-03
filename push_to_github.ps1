@@ -16,8 +16,40 @@ Write-Host "=== VoxPoser -> GitHub Auto Push ===" -ForegroundColor Cyan
 Write-Host "Remote: $remote"
 Write-Host ""
 
-# Override global proxy for GitHub access
-$gitArgs = @("-c", "http.proxy=", "-c", "https.proxy=")
+# ── Proxy selection ────────────────────────────────────────────────────────
+# The global git proxy may point to a stale port (e.g. 7890) while the running
+# client (Clash Verge) listens elsewhere (e.g. 7897), and a direct connection is
+# often reset. Probe common local proxy ports and use the first reachable one;
+# if none respond, fall back to a direct connection.
+function Test-LocalPort([int]$Port) {
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne(300, $false) -and $client.Connected) {
+            $client.EndConnect($iar)
+            $client.Close()
+            return $true
+        }
+        $client.Close()
+        return $false
+    } catch {
+        return $false
+    }
+}
+
+$proxyPort = $null
+foreach ($p in 7897, 7890, 7891, 10809, 10808, 1080, 8080, 8888) {
+    if (Test-LocalPort $p) { $proxyPort = $p; break }
+}
+
+if ($proxyPort) {
+    $proxyUrl = "http://127.0.0.1:$proxyPort"
+    $gitArgs = @("-c", "http.proxy=$proxyUrl", "-c", "https.proxy=$proxyUrl")
+    Write-Host "Proxy: $proxyUrl (auto-detected)" -ForegroundColor Gray
+} else {
+    $gitArgs = @("-c", "http.proxy=", "-c", "https.proxy=")
+    Write-Host "Proxy: none (direct)" -ForegroundColor Gray
+}
 
 # ── API Key Protection ─────────────────────────────────────────────────────
 # Replace any hardcoded API keys in tracked files with a placeholder reminder
