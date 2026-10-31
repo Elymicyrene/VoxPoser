@@ -1,4 +1,4 @@
-# push_to_github.ps1 - VoxPoser auto-push to GitHub
+﻿# push_to_github.ps1 - VoxPoser auto-push to GitHub
 # Usage: Right-click -> Run with PowerShell, or run in PowerShell
 
 Set-Location $PSScriptRoot
