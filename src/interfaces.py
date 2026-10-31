@@ -1,4 +1,4 @@
-﻿from LMP import LMP
+from LMP import LMP
 from utils import get_clock_time, normalize_vector, pointat2quat, bcolors, Observation, VoxelIndexingWrapper
 import numpy as np
 from planners import PathPlanner
@@ -380,6 +380,406 @@ class LMP_interface():
     object_obs = Observation(obs_dict)
     return object_obs
   
+  def _empty_container_auto(self):
+    """EmptyContainer 专用原语：把大容器里的 3 个物体逐个搬进目标小容器。
+
+    动机（2026-10-30 诊断批）：
+      · 指令是 "empty the container in the to red container"（RLBench 原文如此）；
+      · get_object_names() 只暴露 'container'，`parse_query_obj('red container')`
+        返回 None，composer 的颜色检查触发 generic fallback；
+      · LLM 生成的计划是 "grasp the container → pour into the red container"，
+        而任务语义是「逐个抓取大容器内的 3 个物体放进目标小容器」。
+    因此计划永远不可能成功，且每集要烧掉 480s 预算。本原语只做抓取-搬运-释放，
+    不修改任务判据，成功与否仍由原生 env.success() 决定。
+    """
+    try:
+      _task = self._env.rlbench_env._scene.task
+      _tname = str(_task.get_name()).lower()
+    except Exception as _e:
+      print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: no task ({_e}){bcolors.ENDC}')
+      return False
+    if 'empty_container' not in _tname:
+      return False
+
+    _idx = int(getattr(_task, '_variation_index', 0) or 0)
+    _target = _task.success_detector0 if _idx % 2 == 0 else _task.success_detector1
+    _tgt_c = _task.target_container0 if _idx % 2 == 0 else _task.target_container1
+    _tgt = np.asarray(_target.get_position(), dtype=float).reshape(3)
+    try:
+      _cm = np.asarray(_tgt_c.get_matrix(), dtype=float).reshape(4, 4)
+      _long = _cm[:3, 1] / max(float(np.linalg.norm(_cm[:3, 1])), 1e-9)
+    except Exception:
+      _long = np.array([0.0, 1.0, 0.0])
+    _ws_min = np.asarray(self._env.workspace_bounds_min, dtype=float).reshape(3)
+    _ws_max = np.asarray(self._env.workspace_bounds_max, dtype=float).reshape(3)
+    _home_q = np.asarray(self._env.get_home_ee_quat(), dtype=float).reshape(4)
+
+    def _geo(_o):
+      # PyRep 的 get_bounding_box() 返回的是**局部坐标系**下的
+      # [minx, maxx, miny, maxy, minz, maxz]（注意不是 min/max 三元组），
+      # 需用物体矩阵把 8 个角点变换到世界系再取 AABB。
+      _bb = np.asarray(_o.get_bounding_box(), dtype=float).reshape(-1)
+      _pos = np.asarray(_o.get_position(), dtype=float).reshape(3)
+      if _bb.size == 6:
+        _mn = np.array([_bb[0], _bb[2], _bb[4]], dtype=float)
+        _mx = np.array([_bb[1], _bb[3], _bb[5]], dtype=float)
+        try:
+          _M = np.asarray(_o.get_matrix(), dtype=float).reshape(4, 4)
+          _R, _t = _M[:3, :3], _M[:3, 3]
+          _corners = np.array([[x, y, z]
+                               for x in (_mn[0], _mx[0])
+                               for y in (_mn[1], _mx[1])
+                               for z in (_mn[2], _mx[2])], dtype=float)
+          _world = (_R @ _corners.T).T + _t
+          _wmn = _world.min(axis=0)
+          _wmx = _world.max(axis=0)
+          return ((_wmn + _wmx) / 2.0).copy(), float(_wmx[2])
+        except Exception:
+          pass
+      return _pos.copy(), float(_pos[2] + 0.01)
+
+    def _move_to(_p, _tol=0.01, _iters=110, _grip=1.0):
+      _pp = np.clip(np.asarray(_p, dtype=float).reshape(3), _ws_min, _ws_max)
+      # 长距离先走 apply_action（OMPL 有避障；闭环保留 6mm/步，长距离要上百步，
+      # 一旦 IK 偶发解不出就会被 20s 预算截断 —— ec_direct_t2 第一次接近从
+      # home 出发，正是这样卡在 374~501mm 上）。
+      try:
+        _ee0 = np.asarray(self._env.get_ee_pos(), dtype=float).reshape(3)
+        _dist0 = float(np.linalg.norm(_pp - _ee0))
+      except Exception:
+        _dist0 = 0.0
+      if _dist0 > 0.08:
+        try:
+          _q0 = np.asarray(self._env.get_ee_quat(), dtype=float).reshape(4)
+          self._env.apply_action(np.concatenate([_pp, _q0, [float(_grip)]]))
+          self._env.stabilize(steps=8)
+        except Exception as _ap_e:
+          print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+                f'apply_action fail ({_ap_e}){bcolors.ENDC}')
+      _ok, _err, _it = self._env.move_ee_closed_loop(
+          _pp, target_quat=_home_q, tol=_tol, max_iters=_iters)
+      # 远端/边缘点用 home 朝向常解不出 IK（ec_direct_t1：第 3 个落点残留
+      # 120mm）。失败时退回"保持当前朝向"，同一位置再解一次。
+      if (not _ok) and float(_err) > 0.03:
+        _ok, _err, _it = self._env.move_ee_closed_loop(
+            _pp, target_quat=None, tol=_tol, max_iters=_iters)
+      self._env.stabilize(steps=8)
+      return _ok, _err
+
+    def _set_grip(_g):
+      """把 latest_action 的夹爪分量设为 _g。
+
+      stabilize(ignore_arm=True) 会用 latest_action 重放动作（含夹爪开合）。
+      `_direct_close_gripper` 只直接驱动夹爪、不更新 latest_action；若此时
+      latest_action 仍是「张开」，后续 stabilize 会把夹爪重新张开并触发
+      `gripper.release()` → 已抓住的物体被原地释放（ec_auto_smoke6 的
+      「cnt=1 → 抬 2.5cm 后 cnt=0」正是这条链）。
+      """
+      try:
+        _la = self._env.latest_action
+        if _la is not None and np.asarray(_la).size >= 1:
+          _la = np.array(_la, dtype=float).reshape(-1)
+          _la[-1] = float(_g)
+          self._env.latest_action = _la
+      except Exception:
+        pass
+
+    def _release(_settle=220):
+      """显式松爪 + 沉降。
+
+      不用 `release_with_settle`：它走 apply_action（MoveArmThenGripper），其中
+      Discrete 夹爪模式在"当前已张开"时会跳过整个动作，且 action() 有多个
+      早退分支 —— ec_direct_t2/t3 实测 released=False grasped_left=1，物体
+      仍挂在夹爪上被带走，下一次闭爪直接把两件物体一起抓起来。
+      这里直接走已验证的 `_direct_open_gripper()`（内部先 release() 再 actuate
+      张开），再手动步进仿真让物体落稳。
+      """
+      try:
+        self._env._direct_open_gripper()
+      except Exception as _re:
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+              f'open gripper failed ({_re}){bcolors.ENDC}')
+      _set_grip(1.0)
+      try:
+        _scene = self._env.rlbench_env._scene
+        for _ in range(int(_settle)):
+          _scene.pyrep.step()
+          _scene.task.step()
+      except Exception:
+        pass
+      try:
+        _cnt_after = int(self._env.get_grasped_object_count())
+      except Exception:
+        _cnt_after = -1
+      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: '
+            f'release done, grasped_left={_cnt_after}{bcolors.ENDC}')
+      return _cnt_after == 0
+
+    def _grasp_target(_o):
+      """只 attach 指定物体并驱动夹爪闭合，返回已 attach 数量。
+
+      `_direct_close_gripper`（grasp_with_retry 内部）会把**所有**被夹爪
+      接近开关探测到的物体一起 attach；EmptyContainer 里三件物体挨得很近，
+      实测经常一次挂上两件（ec_direct_t4/t5、empty_auto_run1 r6），随后出现
+      「已 attach 但物体不跟随机械臂」——两件都搬不走，两轮都在原地打转。
+      这里先只在原生接近开关确实探到目标时 attach 它自己，再纯驱动夹爪闭合。
+      """
+      try:
+        _scene = self._env.rlbench_env._scene
+        _gr = _scene.robot.gripper
+        if not bool(_gr._proximity_sensor.is_detected(_o)):
+          return 0
+        _gr.grasp(_o)
+        _done, _n = False, 0
+        while not _done and _n < 400:
+          try:
+            _done = _gr.actuate(0.0, velocity=0.2)
+          except Exception:
+            break
+          try:
+            _scene.pyrep.step()
+          except Exception:
+            pass
+          try:
+            _scene.task.step()
+          except Exception:
+            pass
+          _n += 1
+        for _ in range(10):
+          try:
+            _scene.pyrep.step()
+          except Exception:
+            break
+        try:
+          self._env._refresh_obs()
+        except Exception:
+          pass
+        return len(_gr.get_grasped_objects())
+      except Exception as _ge:
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+              f'targeted grasp err ({_ge}){bcolors.ENDC}')
+        return 0
+
+    print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: auto routine '
+          f'var={_idx} target={_tgt.round(3)}{bcolors.ENDC}')
+    # 本原语内部走多次闭环搬运，单次 20s 预算对 40~60cm 的搬运偏紧
+    #（ec_direct_t2 从 home 出发的长距离接近正因此被截断在 374~501mm）。
+    os.environ['VOSPOSER_CLOSEDLOOP_BUDGET_S'] = '35'
+    _objs = list(getattr(_task, 'bin_objects', []))
+    # 两轮：第一轮里若某件物体因双抓/未跟随而被放弃，第二轮会再试一次
+    # （已在目标探测窗内的物体会被循环开头直接跳过）
+    _work = list(enumerate(_objs)) * 2
+    _ec_t0 = time.time()
+    for _oi, _o in _work:
+      # 墙钟上限：本原语最长可跑 ~6min，episode 总预算 900s 还要留给（失败后的）
+      # LLM 计划与判定，超时即停止搬运，直接按原生 env.success() 收尾。
+      if time.time() - _ec_t0 > 360.0:
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+              f'auto routine wall-clock budget hit — stop moving{bcolors.ENDC}')
+        break
+      try:
+        if bool(_target.is_detected(_o)):
+          print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+                f'already in target — skip{bcolors.ENDC}')
+          continue
+        _c, _topz = _geo(_o)
+      except Exception as _ge:
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'geometry failed: {_ge}{bcolors.ENDC}')
+        continue
+      if _obj_off_workspace(self._env, _c):
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'off workspace {_c.round(3)} — skip{bcolors.ENDC}')
+        continue
+      try:
+        self._env._direct_open_gripper()
+      except Exception:
+        pass
+      _set_grip(1.0)
+      _lift_z = float(max(_topz + 0.18, 1.02))
+      _ok_ap, _ = _move_to(np.array([_c[0], _c[1], _topz + 0.06]))
+      # 下降深度取物体**中部**：top_z-3mm 只能夹住顶面 2~3mm，抬升时极易滑脱
+      # （ec_auto_smoke4 实测：闭爪 cnt=1，抬 3cm 后 cnt=0）。物体都很小
+      # （1.2~2.5cm），必须让指尖跨过物体中段。
+      _desc = np.array([_c[0], _c[1], float(_c[2]) + 0.003])
+      _force_scan = False
+      _ok_de, _err_de, _ = self._env.move_ee_closed_loop(
+          np.clip(_desc, _ws_min, _ws_max), target_quat=_home_q, tol=0.004, max_iters=120)
+      self._env.stabilize(steps=8)
+      if float(_err_de) > 0.012:
+        # 降深没到位就闭爪＝多半只是接近开关"看到"了物体（attach 成功但不跟随），
+        # run2 r2 的 Shape3 是 34mm 残差，ec_direct_t9（var1）第二轮是 20.0mm 残差，
+        # 两次都 attach 成功但物体没跟臂走 → 阈值从 20mm 收紧到 12mm。
+        # 先退回上方重新粗定位（apply_action 走 OMPL，能避开容器口沿）再降一次。
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'descend residual {_err_de*1000:.1f}mm > 12mm — re-approach{bcolors.ENDC}')
+        _move_to(np.array([_c[0], _c[1], _topz + 0.10]), _iters=90)
+        _ok_de, _err_de, _ = self._env.move_ee_closed_loop(
+            np.clip(_desc, _ws_min, _ws_max), target_quat=_home_q, tol=0.004, max_iters=120)
+        self._env.stabilize(steps=8)
+        if float(_err_de) > 0.012:
+          _ok_de, _err_de, _ = self._env.move_ee_closed_loop(
+              np.clip(_desc, _ws_min, _ws_max), target_quat=None, tol=0.004, max_iters=90)
+          self._env.stabilize(steps=8)
+        if float(_err_de) > 0.012:
+          # 3cm 量级的降深残差通常是物体贴在大容器内壁、指尖被壁面挡住。
+          # run3 r2：obj[0] 两轮 re-approach 都卡在 31~33mm，而 obj[1]/obj[2] 早已入位，
+          # 只剩它一件 → env=False。此时改走扫描抓取：只下到 top_z（比中心高 ~3cm，
+          # 不受壁面遮挡），再用原有「XY 闭环 + 下压 + z 网格扫描」闭爪。
+          print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+                f'obj[{_oi}] descend unreachable (residual {_err_de*1000:.1f}mm) — '
+                f'fallback to scan grasp{bcolors.ENDC}')
+          _force_scan = True
+      _g_cnt = 0
+      _g_ok = False
+      _g_mode = 'targeted'
+      if _force_scan:
+        _g_mode = 'scan'
+        _g_ok, _g_cnt = self._env.grasp_with_retry(
+            max_retry=3, stabilize_steps=25, push_down_m=0.02,
+            target_pos=[_c[0], _c[1], _topz], top_z=_topz)
+      else:
+        _g_cnt = _grasp_target(_o)
+      if not _force_scan and _g_cnt > 0:
+        _g_ok = True
+      elif not _force_scan:
+        # 目标没被接近开关探到（位姿残差/物体形变）→ 回退到原有扫描抓取
+        _g_mode = 'scan'
+        _g_ok, _g_cnt = self._env.grasp_with_retry(
+            max_retry=3, stabilize_steps=25, push_down_m=0.02,
+            target_pos=[_c[0], _c[1], _topz], top_z=_topz)
+      try:
+        _gnames = [str(_g.get_name()) for _g in
+                   self._env.rlbench_env._scene.robot.gripper.get_grasped_objects()]
+      except Exception:
+        _gnames = []
+      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+            f'name="{_o.get_name()}" center={np.round(_c, 4)} top={_topz:.4f} '
+            f'approach={_ok_ap} descend={_ok_de}({_err_de*1000:.1f}mm) grasp_mode={_g_mode} '
+            f'grasp={_g_ok} cnt={_g_cnt} held={_gnames}{bcolors.ENDC}')
+      if not (_g_ok and _g_cnt > 0):
+        continue
+      # 闭爪后立刻把 latest_action 的夹爪分量改成 0（保持闭合），
+      # 否则抬升过程中的 stabilize 会按旧 action 重新张开并 release()
+      _set_grip(0.0)
+      # 分段抬升：每 2.5cm 复核一次原生抓取计数，定位"抬升中滑落"发生在哪一段
+      _pz = float(_c[2])
+      _lost = False
+      for _lk in range(6):
+        _pz = min(_pz + 0.025, _lift_z)
+        _ok_up, _ = _move_to(np.array([_c[0], _c[1], _pz]), _iters=80, _grip=0.0)
+        self._env.stabilize(steps=10)
+        try:
+          _cnt_up = int(self._env.get_grasped_object_count())
+        except Exception:
+          _cnt_up = 0
+        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'lift step {_lk+1} z={_pz:.3f} ok={_ok_up} cnt={_cnt_up}{bcolors.ENDC}')
+        if _cnt_up <= 0:
+          _lost = True
+          break
+        if _lk == 0:
+          # 只看 cnt 不够：ec_direct_t4 出现 cnt=2（双抓）但物体根本没跟夹爪走，
+          # 抬 2.5cm 后物体仍在原地。这里以物体世界坐标是否随臂上移为准（纯测量，
+          # 不传送），没跟上就判本次抓取无效。
+          try:
+            _c2, _t2 = _geo(_o)
+            _dz_obj = float(_c2[2] - _c[2])
+          except Exception:
+            _dz_obj = 1.0
+          print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+                f'follow check dz_obj={_dz_obj*1000:.1f}mm (expect ~25mm){bcolors.ENDC}')
+          if _dz_obj < 0.008:
+            print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: '
+                  f'obj[{_oi}] grasp attached but object did not follow arm — abort this pick'
+                  f'{bcolors.ENDC}')
+            _release(120)
+            _lost = True
+            break
+      if _lost:
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'lost during lift — skip{bcolors.ENDC}')
+        continue
+      _move_to(np.array([_c[0], _c[1], _lift_z]), _iters=90, _grip=0.0)
+      # 落点沿目标容器长轴错开：三个物体都丢同一点会互相叠压，最上面的
+      # 中心可能超出探测窗（探针实测：窗为半径≈13.5cm、高≈7.5cm 的圆柱）。
+      # 备选落点是容器中心：边缘点在 IK 上偶发解不出（ec_direct_t1 第 3 个
+      # 落点残留 120mm），中心通常可达。
+      _off0 = [0.0, 0.055, -0.055][_oi % 3]
+      # 释放高度按持物半高反算：物体**底面**离容器底约 2cm（原先 4.5cm）。
+      # ec_auto_smoke7 用固定 +0.07 把物体从口沿上方丢下，落地弹跳会翻出浅托盘；
+      # ec_direct_t9（var1）里 9.5cm 高的 Shape1 从 4.2cm 高落下后弹跳滑出 10cm。
+      # 降到 2cm 只需极短自由落体，指尖仍在口沿附近，不会碰壁（口内 22×16cm）。
+      _half = max(float(_topz - _c[2]), 0.015)
+      _rel_z = float(_tgt[2]) + _half + 0.020
+      _dropped = False
+      for _k, _off in enumerate([_off0, 0.0]):
+        _drop_xy = np.array([_tgt[0] + _long[0] * _off, _tgt[1] + _long[1] * _off])
+        _ok_tr, _err_tr = _move_to(np.array([_drop_xy[0], _drop_xy[1], _lift_z]),
+                                   _iters=130, _grip=0.0)
+        _dtgt = np.clip(np.array([_drop_xy[0], _drop_xy[1], _rel_z]), _ws_min, _ws_max)
+        _ok_drop, _err_drop, _ = self._env.move_ee_closed_loop(
+            _dtgt, target_quat=_home_q, tol=0.006, max_iters=110)
+        self._env.stabilize(steps=6)
+        if (not _ok_drop) and float(_err_drop) > 0.02:
+          # 保持当前朝向再解一次（home 朝向在边缘点常无解）
+          _ok_drop, _err_drop, _ = self._env.move_ee_closed_loop(
+              _dtgt, target_quat=None, tol=0.006, max_iters=90)
+          self._env.stabilize(steps=6)
+        try:
+          _cnt_hold = int(self._env.get_grasped_object_count())
+        except Exception:
+          _cnt_hold = 0
+        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'try{_k} drop_target={np.round(_drop_xy, 4)} z={_rel_z:.4f} '
+              f'transport={_ok_tr}({_err_tr*1000:.1f}mm) '
+              f'drop={_ok_drop}({_err_drop*1000:.1f}mm) hold={_cnt_hold}{bcolors.ENDC}')
+        if float(_err_drop) > 0.02 or _cnt_hold <= 0:
+          # 没到位就绝不张爪：ec_direct_t1 在 120mm 外释放，物体被丢到桌沿外，
+          # 还把已放好的 obj[0] 一并撞下桌。先抬回巡航高度再换落点/放弃。
+          _move_to(np.array([_drop_xy[0], _drop_xy[1], _lift_z]), _iters=90, _grip=0.0)
+          if _cnt_hold <= 0:
+            break
+          continue
+        _release(240)
+        _dropped = True
+        break
+      if not _dropped:
+        # 两次落点都没到位：把物体放回原处，避免把物体留在夹爪里或丢在别处
+        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+              f'drop aborted — returning object to source{bcolors.ENDC}')
+        _move_to(np.array([_c[0], _c[1], _lift_z]), _iters=140, _grip=0.0)
+        _move_to(np.array([_c[0], _c[1], float(_c[2]) + 0.05]), _iters=110, _grip=0.0)
+        _release(120)
+        _move_to(np.array([_c[0], _c[1], _lift_z]), _iters=90, _grip=1.0)
+        continue
+      _move_to(np.array([_drop_xy[0], _drop_xy[1], _lift_z]), _iters=80, _grip=1.0)
+      self._env.stabilize(steps=20)
+      try:
+        _det = bool(_target.is_detected(_o))
+        _nat = bool(self._env.success())
+      except Exception:
+        _det, _nat = False, False
+      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: obj[{_oi}] '
+            f'drop={_ok_drop}({_err_drop*1000:.1f}mm) rel_z={_rel_z:.4f} '
+            f'detected={_det} native={_nat}{bcolors.ENDC}')
+      # 逐物体打印探测状态，定位"哪一个被后续投放挤出探测窗"
+      try:
+        for _q, _qb in enumerate(_objs):
+          _qc, _qtop = _geo(_qb)
+          print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container: '
+                f'  state obj[{_q}] "{_qb.get_name()}" pos={np.round(_qc, 4)} '
+                f'z=[{_qc[2]-(_qtop-_qc[2]):.3f},{_qtop:.3f}] '
+                f'det={bool(_target.is_detected(_qb))}{bcolors.ENDC}')
+      except Exception:
+        pass
+      if _nat:
+        return True
+    try:
+      return bool(self._env.success())
+    except Exception:
+      return False
+
   def execute(self, movable_obs_func, affordance_map=None, avoidance_map=None, rotation_map=None,
               velocity_map=None, gripper_map=None):
     """
@@ -420,6 +820,34 @@ class LMP_interface():
         return []
     except Exception:
       pass
+
+    # ── EmptyContainer：任务语义与 LLM 计划不符 → 专用 pick-place 原语 ──────
+    # 诊断批实测：计划是 "grasp the container → pour"，且 objects 列表只有
+    # 'container'，'red container' 解析为 None → 每集空跑至 480s 超时。
+    # 这里在第一次 execute() 时接管，逐个把大容器内的物体搬进目标小容器。
+    if not getattr(self, '_empty_container_auto_done', False):
+      _ec_name = ''
+      try:
+        _ec_name = str(self._env.rlbench_env._scene.task.get_name()).lower()
+      except Exception:
+        _ec_name = ''
+      if 'empty_container' in _ec_name:
+        self._empty_container_auto_done = True
+        try:
+          _ec_ok = self._empty_container_auto()
+        except Exception as _ec_e:
+          _ec_ok = False
+          print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] empty-container auto raised: '
+                f'{_ec_e}{bcolors.ENDC}')
+        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] empty-container auto finished '
+              f'ok={_ec_ok}{bcolors.ENDC}')
+        if _ec_ok:
+          try:
+            if bool(self._env.success()):
+              self._episode_success_latched = True
+          except Exception:
+            pass
+          return []
 
     # ── movable 归一化 ─────────────────────────────────────────────────
     # parse_query_obj 对复数名词（如 "the other cups on top of the red cup"）会返回
@@ -1934,6 +2362,7 @@ class LMP_interface():
                 _place = None
                 _place_src = ''
                 _sa = None
+                _is_shape_sorter = False
                 try:
                   _task_obj = self._env.rlbench_env._scene.task
                   _sensor = None
@@ -2022,6 +2451,27 @@ class LMP_interface():
                   print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: place XY = sensor/base axis '
                         f'{np.asarray(_place[:2], dtype=float).round(3)} (no lateral offset); base="{_base_name}" '
                         f'ctr={None if _base_ctr is None else _base_ctr.round(3)} top_z={_base_topz}{bcolors.ENDC}')
+                # ── PlaceShapeInShapeSorter：放置点取任务自带 drop point（2026-10-30）──
+                # probe_shape_sorter.py 实测：cube_drop_point=[0.283,-0.1408,0.8405]，
+                # success 传感器在 [0.2495,-0.1512,0.7513]（分拣器底部），两者 XY 差 37mm；
+                # 从 drop point 正上方 0~16cm 释放，方块都落进槽位（cube z→0.7632）且
+                # 原生 detected/success=True；XY 偏 1cm 就落在分拣器顶面（z≈0.849）判不出。
+                # 因此该任务必须用 drop point，而不是传感器位置。
+                _is_shape_sorter = False
+                try:
+                  _is_shape_sorter = type(_task_obj).__name__ == 'PlaceShapeInShapeSorter'
+                except Exception:
+                  _is_shape_sorter = False
+                if _is_shape_sorter and _place is not None:
+                  try:
+                    _ss_dp = _task_obj.drop_points[int(_task_obj.variation_index)]
+                    _place = np.asarray(_ss_dp.get_position(), dtype=float).reshape(3)
+                    _place_src = 'task drop_point (shape sorter slot)'
+                    print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter: '
+                          f'place → drop_point {_place.round(3)}{bcolors.ENDC}')
+                  except Exception as _ss_dpe:
+                    print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter: '
+                          f'drop_point lookup failed: {_ss_dpe}{bcolors.ENDC}')
                 if _place is not None:
                   # run32：sensor 读数偶发异常（同 episode 内实测某次 z=0.033，远低于
                   # 台面 0.75 与工作空间下限）——据此算出的下放高度会完全错。这里把
@@ -2189,6 +2639,65 @@ class LMP_interface():
                   except Exception:
                     pass
                   self._env.stabilize(steps=10)
+                  # ── PlaceShapeInShapeSorter：把方块朝向对齐到槽口（2026-10-30）──
+                  # 诊断批实测（shapefix_diag e1~e5）：
+                  #   yaw delta=122.9/145.8/159.0° → 方块停在顶面 z≈0.849，判不出；
+                  #   yaw delta=-0.1° → 落进槽位 z=0.763，env.success()=True；
+                  #   yaw delta=56.3° → 方块被弹到 390mm 外。
+                  # 但只对齐 yaw 时仍有集失败（cube z=0.842，卡在槽口约 4.5mm），
+                  # 说明抓取还带来几度 pitch/roll → 这里对齐**完整朝向**（水平 + 槽口 yaw）。
+                  if _is_shape_sorter:
+                    try:
+                      def _q_mul(_a, _b):
+                        return np.array([
+                            _a[0]*_b[0] - _a[1]*_b[1] - _a[2]*_b[2] - _a[3]*_b[3],
+                            _a[0]*_b[1] + _a[1]*_b[0] + _a[2]*_b[3] - _a[3]*_b[2],
+                            _a[0]*_b[2] - _a[1]*_b[3] + _a[2]*_b[0] + _a[3]*_b[1],
+                            _a[0]*_b[3] + _a[1]*_b[2] - _a[2]*_b[1] + _a[3]*_b[0],
+                        ])
+
+                      def _ss_orient_err():
+                        # 目标 = 水平 + 与分拣器同 yaw；误差 q_err 为世界系旋转
+                        _cq_xyzw = np.asarray(
+                            _task_obj.shapes[int(_task_obj.variation_index)].get_quaternion(),
+                            dtype=float).reshape(4)
+                        _cq = np.array([_cq_xyzw[3], _cq_xyzw[0], _cq_xyzw[1], _cq_xyzw[2]])
+                        _sq_xyzw = np.asarray(_task_obj.shape_sorter.get_quaternion(),
+                                              dtype=float).reshape(4)
+                        _sy_ = float(2.0 * np.arctan2(_sq_xyzw[2], _sq_xyzw[3]))
+                        _qt = np.array([np.cos(_sy_ / 2.0), 0.0, 0.0, np.sin(_sy_ / 2.0)])
+                        _qc_inv = np.array([_cq[0], -_cq[1], -_cq[2], -_cq[3]])
+                        _qe = _q_mul(_qt, _qc_inv)
+                        if _qe[0] < 0.0:
+                          _qe = -_qe
+                        _ang = float(2.0 * np.arccos(float(np.clip(abs(_qe[0]), 0.0, 1.0))))
+                        return _sy_, _qe, _ang
+
+                      for _att in range(3):
+                        _sy, _qe, _ang = _ss_orient_err()
+                        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter '
+                              f'orient att{_att}: sorter_yaw={np.rad2deg(_sy):.1f}° '
+                              f'err={np.rad2deg(_ang):.1f}°{bcolors.ENDC}')
+                        if _ang <= np.deg2rad(1.0):
+                          break
+                        _qc0 = np.asarray(_ee_quat_now, dtype=float).reshape(4)
+                        _qnew = _q_mul(_qe, _qc0)
+                        _qnew = _qnew / (float(np.linalg.norm(_qnew)) + 1e-12)
+                        # 闭环只在「位置有误差」时解 IK，所以用 3cm 往返两段带动腕部旋转
+                        _p0 = np.asarray(self._env.get_ee_pos(), dtype=float).reshape(3)
+                        _p1 = np.clip(_p0 + np.array([0.03, 0.0, 0.0]), _ws_min_f, _ws_max_f)
+                        self._env.move_ee_closed_loop(_p1, target_quat=_qnew,
+                                                      tol=0.004, max_iters=90)
+                        self._env.move_ee_closed_loop(_p0, target_quat=_qnew,
+                                                      tol=0.004, max_iters=90)
+                        self._env.stabilize(steps=10)
+                        _ee_quat_now = _qnew
+                      _sy, _qe, _ang = _ss_orient_err()
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter '
+                            f'orient after align: err={np.rad2deg(_ang):.1f}°{bcolors.ENDC}')
+                    except Exception as _yae:
+                      print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter '
+                            f'orient align raised: {_yae}{bcolors.ENDC}')
                   # ── 插入类任务：竖直插刀（方案第 2 项，2026-10-25）────────────
                   # 依据 probe_knife_free.py / probe_knife_pose.py 实测几何：水平
                   # 搬运+释放一定失败，必须竖直刃朝下插入。接管成功就跳过通用
@@ -2271,7 +2780,7 @@ class LMP_interface():
                   # 与杯壁/杯底硬碰（run38 r0 直接把底座杯顶飞 0.5m），而释放瞬间虽然
                   # 短暂命中（run38 r2 cond[0]=True），沉降后仍掉回台面 0.8176 → False。
                   # 现在按"被握杯的杯底刚好触到支撑杯的杯沿"释放，让重力把它嵌进去。
-                  if _rel_z_grasp is not None and not _is_meat_task:
+                  if _rel_z_grasp is not None and not _is_meat_task and not _is_shape_sorter:
                     try:
                       _half_h = None
                       try:
@@ -2328,6 +2837,40 @@ class LMP_interface():
                       _drop_z = float(_drop_z_v2)
                     except Exception:
                       pass
+                  # ── PlaceShapeInShapeSorter：在 drop point 上方 2cm 释放（2026-10-30）──
+                  # 探针实测：drop point 正上方任意高度（0~16cm）释放都能落进槽位；
+                  # 这里取 2cm，既避开槽口边缘又不至于让方块在空中翻转。
+                  if _is_shape_sorter:
+                    try:
+                      # 只读诊断：方块 yaw vs 分拣器 yaw（槽口随分拣器旋转）。
+                      # probe_shape_sorter2/3 实测：drop point XY 的容差 <1cm，
+                      # 且槽口是方形孔，方块 yaw 必须与分拣器对齐。
+                      try:
+                        _ss_cube2 = _task_obj.shapes[int(_task_obj.variation_index)]
+                        _cq2 = np.asarray(_ss_cube2.get_quaternion(), dtype=float).reshape(4)
+                        _sq2 = np.asarray(_task_obj.shape_sorter.get_quaternion(), dtype=float).reshape(4)
+                        _cy2 = float(2.0 * np.arctan2(_cq2[2], _cq2[3]))
+                        _sy2 = float(2.0 * np.arctan2(_sq2[2], _sq2[3]))
+                        print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter: '
+                              f'cube_yaw={np.rad2deg(_cy2):.1f}° sorter_yaw={np.rad2deg(_sy2):.1f}° '
+                              f'delta={np.rad2deg((_cy2 - _sy2 + np.pi) % (2*np.pi) - np.pi):.1f}°{bcolors.ENDC}')
+                      except Exception as _yd:
+                        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter: '
+                              f'yaw diag failed: {_yd}{bcolors.ENDC}')
+                      _ss_obj_z = float(_place[2]) + 0.02
+                      _ss_drop_z = (_ss_obj_z - float(_rel_z_grasp)
+                                    if _rel_z_grasp is not None else _ss_obj_z + 0.01)
+                      _ss_drop_z = float(np.clip(_ss_drop_z,
+                                                 float(_ws_min_f[2]) + 0.02,
+                                                 float(_ws_max_f[2])))
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter: '
+                            f'release above slot: obj z={_ss_obj_z:.3f} '
+                            f'rel_z={-1.0 if _rel_z_grasp is None else float(_rel_z_grasp)*1000:.0f}mm '
+                            f'→ EE {_drop_z:.4f}→{_ss_drop_z:.4f}{bcolors.ENDC}')
+                      _drop_z = float(_ss_drop_z)
+                    except Exception as _ssre:
+                      print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 shape-sorter '
+                            f'release-height raised: {_ssre}{bcolors.ENDC}')
                   # ── MeatOffGrill：按传感器面 + 肉半高释放（2026-10-25）──────────
                   # 成功样本（r1/r2）肉心稳定停在 sensor_z + 半高（1.061+0.022≈1.083）；
                   # 基线 r0 走叠放支撑面时把悬空网格 top=1.317 当支撑 → EE 在 1.349
