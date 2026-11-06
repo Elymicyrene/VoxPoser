@@ -25,7 +25,12 @@ _PICKABLE_TOKENS = {'meat', 'chicken', 'beef', 'pork', 'fish', 'steak',
                     'plate', 'bowl', 'tissue', 'book', 'box', 'cube',
                     # 2026-10-25：PutKnifeInKnifeBlock 的 movable 是 'knife'，旧词表没有它，
                     # 于是 Fix2（pick-place 兜底）从不进入，只剩无目标的 intend-CLOSE 闭爪。
-                    'knife'}
+                    'knife',
+                    # 2026-11-05：PutRubbishInBin 的指令是 "put rubbish in bin"，场景里同时有
+                    # 'silver rubbish' 与干扰物 'grey tomato1/2'。旧词表只认识 tomato，
+                    # 场景推断于是抓到干扰物（全量批 3 集失败全部解析到 grey tomato1/2），
+                    # 抓取自然全空。补上 rubbish 类名词后，指令命中优先选 'silver rubbish'。
+                    'rubbish', 'trash', 'garbage', 'litter'}
 _SLIDABLE_TOKENS = {'slider', 'sliders', 'drawer'}
 # R4: "block/brick" 既可被抓起（pick up the block）也可被推动
 # （slide the block to target），单靠名词无法判定 → 归入歧义集合，
