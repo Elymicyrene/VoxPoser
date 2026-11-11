@@ -3480,6 +3480,22 @@ class LMP_interface():
                     _dr_ok, _dr_err, _dr_it2 = self._env.move_ee_closed_loop(
                         _drop, target_quat=_ee_quat_now, tol=0.006, max_iters=120)
                     print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2: descend-to-place retry ok={_dr_ok} err={_dr_err*1000:.1f}mm iters={_dr_it2} target_z={_drop[2]:.4f}{bcolors.ENDC}')
+                  if (not _dr_ok) and _is_cups_task and float(_dr_err) > 0.05:
+                    # 2026-11-11：PlaceCups 全量批里 6/10 集的下放残差都是 66~96mm，
+                    # 且日志显示 EE 停在 1.146 不再下探（fallback: ee=[…1.147]
+                    # target=[…1.053]）—— 是该腕部朝向在当前位形下解不出更低的 IK。
+                    # 换 home 朝向再解一次：朝向只影响杯子绕竖直轴的转角，判定锥是
+                    # 向上开口的旋转体，不依赖手柄 yaw（probe 已证三种朝向都可检出）。
+                    try:
+                      _q_home_c = np.asarray(self._env.get_home_ee_quat(), dtype=float).reshape(4)
+                      _dr_ok, _dr_err, _dr_it3 = self._env.move_ee_closed_loop(
+                          _drop, target_quat=_q_home_c, tol=0.006, max_iters=120)
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 cups: descend retry '
+                            f'with home quat ok={_dr_ok} err={_dr_err*1000:.1f}mm iters={_dr_it3}'
+                            f'{bcolors.ENDC}')
+                    except Exception as _hqe:
+                      print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 cups: home-quat '
+                            f'descend raised: {_hqe}{bcolors.ENDC}')
                   self._env.stabilize(steps=10)
                   # (c2) 释放前守卫：仍握持物体 + 落点误差足够小，否则不释放。
                   #      在错误高度/错误位置释放只会把物体丢在随机位置（run25 r1/r2
