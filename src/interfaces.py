@@ -3797,7 +3797,11 @@ class LMP_interface():
                     f'({_sen_xy[0]:.3f},{_sen_xy[1]:.3f}){bcolors.ENDC}')
 
               _t_slide = time.time()
-              _SLIDE_BUDGET_S = 55.0
+              # 55s → 160s（2026-11-11）：全量批 r1 实测方块初始距传感器 343.6mm，
+              # 每次 push 单次上限 180mm、1.5mm/步 + 6 步稳定，约 28s 只能推进 70mm；
+              # 55s 预算在第 2 次 push 后即耗尽（方块仍在 278.5mm 外）。远端方块需要
+              # 4~5 个 push 轮次，按 160s 给出余量。失败集的多耗时间仍在 900s 看门狗内。
+              _SLIDE_BUDGET_S = 160.0
 
               try:
                 _q_home = np.asarray(self._env.get_home_ee_quat(), dtype=float).reshape(4)
@@ -3849,7 +3853,7 @@ class LMP_interface():
               _STOP_MARGIN = 0.036      # 推进到距传感器 36mm 收手（环带 22~38mm 中心）
               _RING_IN = 0.022
               _dead_escaped = 0
-              for _try in range(4):
+              for _try in range(6):
                 if time.time() - _t_slide > _SLIDE_BUDGET_S:
                   print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3: '
                         f'推块总预算 {_SLIDE_BUDGET_S:.0f}s 耗尽 — 停止{bcolors.ENDC}')
@@ -4830,7 +4834,33 @@ class LMP_interface():
           print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] multi-round: grasp lost before release '
                 f'→ abort (no drop){bcolors.ENDC}')
           break
-        self._env.release_with_settle(stabilize_steps=120, lift_before_release=False)
+        # 释放：不用 release_with_settle —— 它走 apply_action(MoveArmThenGripper)，
+        # 释放瞬间可能触发 OMPL/IK 兜底把 EE 甩开。全量批 r7 实测：round1 的 EE
+        # 释放点是 x=0.281，方块最终停在 x=0.206（横向漂 75mm），round2/3 分别漂
+        # 87mm/73mm，两只方块都没进 30mm 检出圆。EmptyContainer/BlockPyramid 已验证
+        # `_direct_open_gripper()`（先 release() 再 actuate 张开）不会动臂。
+        try:
+          self._env._direct_open_gripper()
+        except Exception as _mre:
+          print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] multi-round: open gripper '
+                f'failed ({_mre}){bcolors.ENDC}')
+        try:
+          if self._env.latest_action is not None:
+            _la_mr = np.array(self._env.latest_action, dtype=float).reshape(-1)
+            _la_mr[-1] = 1.0
+            self._env.latest_action = _la_mr
+        except Exception:
+          pass
+        try:
+          _scene_mr = self._env.rlbench_env._scene
+          for _ in range(120):
+            _scene_mr.pyrep.step()
+            _scene_mr.task.step()
+        except Exception:
+          try:
+            self._env.stabilize(steps=120)
+          except Exception:
+            pass
         print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] multi-round[{_rd + 1}]: released "{_name}" '
               f'at {_drop.round(3)}{bcolors.ENDC}')
         try:
