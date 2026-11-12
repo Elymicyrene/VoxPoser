@@ -2920,6 +2920,19 @@ class LMP_interface():
                         return _r
                     return None
 
+                  def _collect_detectors(_conds, _out=None):
+                    # 收集成功条件树里的**全部**探测器（PlaceCups 的 OrConditions 有 3 个，
+                    # 装在 3 根辐条上；_find_detector 只返回第一个，拿不到杯架中心）。
+                    if _out is None:
+                      _out = []
+                    for _c in (_conds or []):
+                      _d = getattr(_c, '_detector', None)
+                      if _d is not None:
+                        _out.append(_d)
+                      else:
+                        _collect_detectors(getattr(_c, '_conditions', None), _out)
+                    return _out
+
                   try:
                     _sensor = _find_detector(
                         getattr(_task_obj, '_success_conditions', []) or [])
@@ -3496,6 +3509,52 @@ class LMP_interface():
                     except Exception as _hqe:
                       print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 cups: home-quat '
                             f'descend raised: {_hqe}{bcolors.ENDC}')
+                    # 2026-11-12 只读探针（probe_place_cups_geom.py / probe_place_cups_ik.py）实测：
+                    #   · success_detector 距杯架立柱轴 33.6~53.1mm，mug AABB 半径 32.8mm
+                    #     → 杯心正对探测器时，杯身/手柄内缘离立柱只有 0.8~20mm；
+                    #   · 同一放置点在**任意**腕部姿态下都能解到目标高度（err≤8mm），
+                    #     说明 95mm 残差不是可达性，而是"杯身已压住立柱侧面"后横竖都动不了。
+                    # 因此：先**垂直抬升**解除接触，再在巡航高度横移到径向外推 18mm 的点，
+                    # 最后重新下放。外推后杯身内缘离开立柱 18mm，探测器（14mm）仍在杯内。
+                    if (not _dr_ok) and float(_dr_err) > 0.05:
+                      try:
+                        _adets = _collect_detectors(
+                            getattr(_task_obj, '_success_conditions', []) or [])
+                        _dxy = np.array([
+                            np.asarray(_dd.get_position(), dtype=float).reshape(3)[:2]
+                            for _dd in _adets], dtype=float)
+                        if _dxy.shape[0] >= 2:
+                          _rack_c = _dxy.mean(axis=0)
+                          _rv = np.asarray(_drop[:2], dtype=float).reshape(2) - _rack_c
+                          _rn = float(np.linalg.norm(_rv))
+                          if 0.02 < _rn < 0.12:
+                            _drop2 = np.array([
+                                float(_drop[0]) + 0.018 * float(_rv[0]) / _rn,
+                                float(_drop[1]) + 0.018 * float(_rv[1]) / _rn,
+                                float(_drop[2])], dtype=float)
+                            _drop2 = np.clip(_drop2, _ws_min_f, _ws_max_f)
+                            _q_home_c2 = np.asarray(
+                                self._env.get_home_ee_quat(), dtype=float).reshape(4)
+                            _eep_l = np.asarray(self._env.get_ee_pos(), dtype=float).reshape(3)
+                            _lift_z = min(float(_ws_max_f[2]),
+                                          max(float(_eep_l[2]) + 0.12,
+                                              float(_drop[2]) + 0.25))
+                            self._env.move_ee_closed_loop(
+                                np.array([_eep_l[0], _eep_l[1], _lift_z], dtype=float),
+                                target_quat=_q_home_c2, tol=0.012, max_iters=90)
+                            self._env.move_ee_closed_loop(
+                                np.array([_drop2[0], _drop2[1], _lift_z], dtype=float),
+                                target_quat=_q_home_c2, tol=0.012, max_iters=90)
+                            _dr_ok, _dr_err, _dr_it4 = self._env.move_ee_closed_loop(
+                                _drop2, target_quat=_q_home_c2, tol=0.006, max_iters=150)
+                            print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix2 cups: '
+                                  f'lift→radial-out 18mm retry (r={_rn*1000:.0f}mm, lift={_lift_z:.3f}) '
+                                  f'ok={_dr_ok} err={_dr_err*1000:.1f}mm iters={_dr_it4}{bcolors.ENDC}')
+                            if _dr_ok:
+                              _drop = _drop2
+                      except Exception as _roe:
+                        print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix2 cups: '
+                              f'lift/radial-out retry raised: {_roe}{bcolors.ENDC}')
                   self._env.stabilize(steps=10)
                   # (c2) 释放前守卫：仍握持物体 + 落点误差足够小，否则不释放。
                   #      在错误高度/错误位置释放只会把物体丢在随机位置（run25 r1/r2

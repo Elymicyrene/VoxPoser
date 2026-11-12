@@ -2765,6 +2765,30 @@ class VoxPoserRLBench():
                     # 越出窗口且更难被 IK 到位，故下压高度以 top_z-17mm 为下界。
                     if top_z is not None:
                         _down[2] = max(_down[2], float(top_z) - 0.017)
+                # 2026-11-12：重试前若 EE 与目标 XY 有明显横向差距（>3cm），
+                # 不能在低处直接直线横移 —— 夹爪会像扫帚一样把台面上的物体扫出桌沿
+                # （全量批 EmptyContainer r3/r8：obj 最终 z≈0.006，掉在桌下）。
+                # 先在当前 XY 垂直抬到安全高度，再横移到目标 XY，最后下压。
+                try:
+                    _eep_r = np.asarray(self.get_ee_pos(), dtype=float).reshape(3)
+                    _xy_gap = float(np.hypot(_eep_r[0] - float(_down[0]),
+                                             _eep_r[1] - float(_down[1])))
+                    if _xy_gap > 0.03:
+                        _wsm = np.asarray(self.workspace_bounds_max, dtype=float).reshape(3)
+                        _safe_z = float(np.clip(
+                            max(float(_down[2]) + 0.10,
+                                (float(top_z) + 0.08) if top_z is not None else _eep_r[2]),
+                            _wsm[2] - 0.25, _wsm[2]))
+                        self.move_ee_closed_loop(
+                            np.array([_eep_r[0], _eep_r[1], _safe_z], dtype=float),
+                            tol=0.010, max_iters=60)
+                        self.move_ee_closed_loop(
+                            np.array([float(_down[0]), float(_down[1]), _safe_z], dtype=float),
+                            tol=0.010, max_iters=60)
+                        print('[rlbench_env.py] grasp_with_retry: lateral gap %.0fmm → lifted to z=%.3f before shifting' %
+                              (_xy_gap * 1000, _safe_z))
+                except Exception as _lae:
+                    print('[rlbench_env.py] grasp_with_retry: lift-before-shift failed: %s' % _lae)
                 _mv_ok, _mv_err, _mv_it = self.move_ee_closed_loop(_down, tol=0.004, max_iters=60)
                 print('[rlbench_env.py] grasp_with_retry: retry move → %s ok=%s err=%.1fmm iters=%d' %
                       (_down.round(3), _mv_ok, _mv_err * 1000, _mv_it))
