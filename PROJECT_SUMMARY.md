@@ -39,58 +39,45 @@
 **随机初始化**、不锁定随机种子、**RLBench 原生 `env.success()` 判据、不做任何成功判据修改**，
 每个变体使用全新环境实例独立运行 **10 次**（共 220 个 episode）。
 
-| 测试项 | 基线（禁用物理补偿） | 启用物理补偿（严格口径，2026-10-23） |
-|---|---|---|
-| `planner_success` | 85.0%（187/220） | **87.3%（192/220）** |
-| `env_success`（整体） | 8.2%（18/220） | **35.5%（78/220）** |
-| joint / 开关类（PushButton / LampOff / PressSwitch，6 变体） | 13.3%（8/60） | **100%（60/60）** |
+| 测试项 | 2026-10-23 基线 | 2026-11-03 | **2026-11-12（当前）** |
+|---|---|---|---|
+| `planner_success` | 87.3%（192/220） | 91.8%（202/220） | **92.7%（204/220）** |
+| `env_success`（整体） | 35.5%（78/220） | 72.3%（159/220） | **73.6%（162/220）** |
+| `env_success`（排除两个任务级不可达任务，180 集） | — | — | **90.0%（162/180）** |
 
 > **关于早期"100%"数字的更正**：早期汇总中曾出现"22/22 = 100%"，其一部分来自
 > "把物体直接传送到成功接近传感器"或"把末端标记物传送到目标位姿即宣告成功"的人工兜底。
 > 这类兜底会**改写成功判据**，属于假成功，已按导师要求**全部移除**。
 > 上表为移除后、仅依赖真实物理执行与原生判据的**严格口径**结果。
-> 同时修复了 CoppeliaSim 运动规划插件（OMPL / IK）的加载问题，`planner_success` 由 85.0% 升至 87.3%。
 
-**分类结果（严格口径）：**
+**任务级冻结**：`StackCups`（0/30）与 `PutKnifeInKnifeBlock`（0/10）的成功探测器位于
+实心碰撞体/叠放几何内部，不通穿透实体就无法触发，属任务级物理不可达，已冻结（见实验记录 §9/§11）。
 
-| 类别 | 变体数 | env_success | 说明 |
-|---|---|---|---|
-| joint / 开关类 | 6 | 100%（60/60） | 物理层补偿的主要受益者 |
-| 抓取 / 堆叠 / 搬运类（非 joint） | 16 | 11.3%（18/160） | 受规划末期收敛误差与抓取执行环节限制 |
-
-**非 joint 任务的进展（2026-10-23 基线）**：TakeUmbrellaOutOfUmbrellaStand 8/10、
-ReachTarget 5/10、PutRubbishInBin 4/10、MeatOffGrill 1/10。
-**SlideBlockToTarget 在 2026-10-24 定向修复后达到 8/10**（同一严格口径，10/10 planner），
-**PickAndLift 在 2026-10-24 抓取链路修复后达到 9/10**（10/10 planner），
-**PlaceCups 在 2026-10-24 放置链路修复后达到 5/10（10/10 planner），
-2026-10-25 改为按辐条顶面定释放高度后先测得 9/10、同一代码重测为 3/10**（两批合计 12/20，
-10/10 planner；杯子在单根辐条上一点支撑，落定过程敏感），
-**StackBlocks 在 2026-10-25 多轮 pick-place 修复后达到 8/10**（10/10 planner），
-**MeatOffGrill 在 2026-10-25 目标解析 + 释放高度修复后达到 9/10**（9/10 planner），
-**TakeLidOffSaucepan 在 2026-10-25"举升进传感器"修复后达到 10/10**（10/10 planner），
-这些结果尚未并入全量基线。
-
-**逐任务 env_success（10 次/变体，2026-10-23 基线）：**
+**逐任务 env_success（10 次/变体，2026-11-12）：**
 
 | 任务 | 变体 | env_success |
 |---|---|---|
 | PushButton | var0 / var1 | 10/10 · 10/10 |
 | LampOff | var0 / var1 | 10/10 · 10/10 |
 | PressSwitch | var0 / var1 | 10/10 · 10/10 |
+| PutRubbishInBin | var0 | 10/10 |
+| TakeLidOffSaucepan | var0 | 10/10 |
+| StackBlocks | var0 | 10/10 |
+| MeatOffGrill | var0 | 9/10 |
+| PickAndLift | var0 | 9/10 |
+| PlaceShapeInShapeSorter | var0 | 9/10 |
+| ReachTarget | var0 | 9/10 |
+| BlockPyramid | var0 | 9/10 |
+| SlideBlockToTarget | var0 | 8/10 |
 | TakeUmbrellaOutOfUmbrellaStand | var0 | 8/10 |
-| ReachTarget | var0 | 5/10 |
-| PutRubbishInBin | var0 | 4/10 |
-| MeatOffGrill | var0 | 1/10 基线 → **9/10**（10-25 修复后） |
-| SlideBlockToTarget | var0 | 0/10 基线 → **8/10**（10-24 修复后） |
-| StackCups | var0 / var1 / var2 | 0/10 · 0/10 · 0/10 |
-| TakeLidOffSaucepan | var0 | 0/10 基线 → **10/10**（10-25 修复后） |
-| PlaceCups | var0 | 0/10 基线 → 5/10（10-24）→ 9/10 后**重测 3/10**（10-25 同一代码，合计 12/20） |
-| PlaceShapeInShapeSorter | var0 | 0/10 |
-| PutKnifeInKnifeBlock | var0 | 0/10 |
-| PickAndLift | var0 | 0/10 基线 → **9/10**（10-24 修复后） |
-| StackBlocks | var0 | 0/10 基线 → **8/10**（10-25 修复后） |
-| EmptyContainer | var0 | 0/10 |
-| BlockPyramid | var0 | 0/10 |
+| EmptyContainer | var0 | 6/10 |
+| PlaceCups | var0 | 5/10 |
+| StackCups | var0 / var1 / var2 | 0/10 · 0/10 · 0/10（冻结） |
+| PutKnifeInKnifeBlock | var0 | 0/10（冻结） |
+
+**残余失败结构**：除两个冻结任务（40 集）外，剩余 18 集失败全部是单点长尾
+（PlaceCups 下放 IK 卡死 5、EmptyContainer 4、SlideBlock 2、TakeUmbrella 2，其余 5 类各 1 集），
+没有新的系统性缺陷；详细归因见实验记录 §23。
 
 ---
 

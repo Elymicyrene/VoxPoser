@@ -72,48 +72,49 @@ cd ../experiment_results
 python run_real10.py
 ```
 
-### Latest Benchmark Result (strict, 22 × 10 = 220 episodes)
+### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-12)
 
 Evaluation uses **genuine random initialization** (no fixed seed), **RLBench's native
 `env.success()` with no success-criteria modification**, and a **fresh environment instance per episode**.
-The numbers below are the 2026-10-23 full baseline (COMPENSATION ON).
+Latest full run: `real10_full_20261111` (COMPENSATION ON).
 
-| Metric | Baseline (physics comp. off) | Physics comp. on (strict) |
-|---|---|---|
-| `planner_success` | 85.0% (187/220) | **87.3% (192/220)** |
-| `env_success` (overall) | 8.2% (18/220) | **35.5% (78/220)** |
-| joint / switch tasks (6 variants) | 13.3% (8/60) | **100% (60/60)** |
+| Metric | 2026-10-23 baseline | 2026-11-03 | **2026-11-12 (current)** |
+|---|---|---|---|
+| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | **92.7% (204/220)** |
+| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | **73.6% (162/220)** |
+| `env_success` excluding the two frozen tasks (180 episodes) | — | — | **90.0% (162/180)** |
+
+> Frozen as task-level physically unreachable: `StackCups` (0/30) and
+> `PutKnifeInKnifeBlock` (0/10) — their success detector sits inside the solid collision
+> body / stacking geometry, so no non-penetrating trajectory can trigger it
+> (see experiment record §9 / §11).
 
 > Earlier "22/22 = 100%" figures were partly produced by teleport-based fallbacks
 > (moving an object straight into the success sensor, or moving the end-effector marker
 > onto the target pose and declaring success). Those fallbacks modified the success
 > criteria and have been removed. The table above is the strict, fallback-free result.
 
-**Post-baseline fix (2026-10-24):** `SlideBlockToTarget` went **0/10 → 8/10** under the
-same strict criteria (10/10 planner), after fixing three execution-layer bugs — see
-"Slide-block push control" below. This targeted result is not yet folded into the full baseline.
-
-**Per-task `env_success` (10 runs per variant, 2026-10-23 baseline):**
+**Per-task `env_success` (10 runs per variant, 2026-11-12):**
 
 | Task | Var | Env |
 |---|---|---|
 | PushButton | 0 / 1 | 10/10 · 10/10 |
 | LampOff | 0 / 1 | 10/10 · 10/10 |
 | PressSwitch | 0 / 1 | 10/10 · 10/10 |
+| PutRubbishInBin | 0 | 10/10 |
+| TakeLidOffSaucepan | 0 | 10/10 |
+| StackBlocks | 0 | 10/10 |
+| MeatOffGrill | 0 | 9/10 |
+| PickAndLift | 0 | 9/10 |
+| PlaceShapeInShapeSorter | 0 | 9/10 |
+| ReachTarget | 0 | 9/10 |
+| BlockPyramid | 0 | 9/10 |
+| SlideBlockToTarget | 0 | 8/10 |
 | TakeUmbrellaOutOfUmbrellaStand | 0 | 8/10 |
-| ReachTarget | 0 | 5/10 |
-| PutRubbishInBin | 0 | 4/10 |
-| MeatOffGrill | 0 | 1/10 baseline → **9/10** post-fix (10-25; still 9/10 after NaN guard + grasp retry, 10-27) |
-| SlideBlockToTarget | 0 | 0/10 baseline → **8/10** post-fix |
-| StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 |
-| TakeLidOffSaucepan | 0 | 0/10 baseline → **10/10** post-fix (10-25) |
-| PlaceCups | 0 | 0/10 baseline → 9/10 then **3/10** on re-run (identical code, 12/20 total) |
-| PlaceShapeInShapeSorter | 0 | 0/10 |
-| PutKnifeInKnifeBlock | 0 | 0/10 |
-| PickAndLift | 0 | 0/10 baseline → **9/10** post-fix |
-| StackBlocks | 0 | 0/10 baseline → **8/10** post-fix |
-| EmptyContainer | 0 | 0/10 |
-| BlockPyramid | 0 | 0/10 |
+| EmptyContainer | 0 | 6/10 |
+| PlaceCups | 0 | 5/10 |
+| StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 (frozen) |
+| PutKnifeInKnifeBlock | 0 | 0/10 (frozen) |
 
 **Post-baseline fix (2026-10-24, grasp chain):** `PickAndLift` went **0/10 → 9/10** under the
 same strict criteria (10/10 planner) after four targeted fixes — see "Grasp-chain fixes" below.
