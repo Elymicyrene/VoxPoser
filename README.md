@@ -72,17 +72,17 @@ cd ../experiment_results
 python run_real10.py
 ```
 
-### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-12)
+### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-13)
 
 Evaluation uses **genuine random initialization** (no fixed seed), **RLBench's native
 `env.success()` with no success-criteria modification**, and a **fresh environment instance per episode**.
-Latest full run: `real10_full_20261111` (COMPENSATION ON).
+Latest full run: `real10_full_20261112` (COMPENSATION ON, output on `D:\综述论文研读_实验数据\`).
 
-| Metric | 2026-10-23 baseline | 2026-11-03 | **2026-11-12 (current)** |
-|---|---|---|---|
-| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | **92.7% (204/220)** |
-| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | **73.6% (162/220)** |
-| `env_success` excluding the two frozen tasks (180 episodes) | — | — | **90.0% (162/180)** |
+| Metric | 2026-10-23 baseline | 2026-11-03 | 2026-11-12 | **2026-11-13 (current)** |
+|---|---|---|---|---|
+| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | 92.7% (204/220) | **91.4% (201/220)** |
+| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | 73.6% (162/220) | **75.5% (166/220)** |
+| `env_success` excluding the two frozen tasks (180 episodes) | — | — | 90.0% (162/180) | **92.2% (166/180)** |
 
 > Frozen as task-level physically unreachable: `StackCups` (0/30) and
 > `PutKnifeInKnifeBlock` (0/10) — their success detector sits inside the solid collision
@@ -94,7 +94,7 @@ Latest full run: `real10_full_20261111` (COMPENSATION ON).
 > onto the target pose and declaring success). Those fallbacks modified the success
 > criteria and have been removed. The table above is the strict, fallback-free result.
 
-**Per-task `env_success` (10 runs per variant, 2026-11-12):**
+**Per-task `env_success` (10 runs per variant, 2026-11-13):**
 
 | Task | Var | Env |
 |---|---|---|
@@ -104,15 +104,15 @@ Latest full run: `real10_full_20261111` (COMPENSATION ON).
 | PutRubbishInBin | 0 | 10/10 |
 | TakeLidOffSaucepan | 0 | 10/10 |
 | StackBlocks | 0 | 10/10 |
-| MeatOffGrill | 0 | 9/10 |
-| PickAndLift | 0 | 9/10 |
+| PickAndLift | 0 | 10/10 |
+| MeatOffGrill | 0 | 7/10 |
 | PlaceShapeInShapeSorter | 0 | 9/10 |
 | ReachTarget | 0 | 9/10 |
 | BlockPyramid | 0 | 9/10 |
-| SlideBlockToTarget | 0 | 8/10 |
+| SlideBlockToTarget | 0 | 9/10 |
 | TakeUmbrellaOutOfUmbrellaStand | 0 | 8/10 |
-| EmptyContainer | 0 | 6/10 |
-| PlaceCups | 0 | 5/10 |
+| EmptyContainer | 0 | 8/10 |
+| PlaceCups | 0 | 7/10 |
 | StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 (frozen) |
 | PutKnifeInKnifeBlock | 0 | 0/10 (frozen) |
 
@@ -129,11 +129,13 @@ that sample. Cross-task regression (PlaceCups ×3, PickAndLift ×2) passed **5/5
 the retry never triggered. An IK-interpolation variant (slerp + step halving) was measured and reverted
 (env 8/10; IK-step advance 0.115 → 0.045 m) — see project summary §4.12.
 
-**Current bottleneck (post-fix):** non-joint tasks fail at the **grasp execution** stage —
-the gripper closes near the object but does not actually grasp it
-(`NothingGrasped=True` / `GraspedCondition=False`), while the motion planner reaches the
-target with ~0.10 m residual error and then falls back to heuristics. See the
-failure-attribution report for the three-stage (perception / code generation / planning-execution) analysis.
+**Current bottleneck (2026-11-13):** of the 54 remaining `env_success` failures, **40 are the two
+frozen tasks** (StackCups 30 + PutKnifeInKnifeBlock 10, physically unreachable detectors).
+The other **14 are single-point long tails** (≤3 per task): PlaceCups "cup released but handle did
+not hook the spoke" 3, MeatOffGrill "release point too high, meat bounces off the sensor" 3,
+EmptyContainer 2 (1 planner timeout, 1 scan-grasp miss), TakeUmbrella 2, and one each in
+SlideBlockToTarget / ReachTarget / PlaceShapeInShapeSorter (init V-REP −1 after retries) /
+BlockPyramid. `planner_success` outside the frozen tasks is **178/180 (98.9%)**.
 
 ### Slide-block push control (2026-10-24)
 
