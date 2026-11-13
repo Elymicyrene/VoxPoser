@@ -75,6 +75,11 @@
 | StackCups | var0 / var1 / var2 | 0/10 · 0/10 · 0/10（冻结） |
 | PutKnifeInKnifeBlock | var0 | 0/10（冻结） |
 
+**定向修复（2026-11-13，MeatOffGrill）**：全量批 7/10 失败的三集都是"释放后未被原生检出"。
+`_place_at_sensor` 新增"首次释放未满足原生条件 → 重抓指令点名的 chicken/steak →
+降低 25mm 再放一次"的重试后，两批各 10 集合计 **18/20（planner 20/20）**；
+剩余 2 集失败是传感器目标不可达（IK 残差 184~377mm），与释放高度无关（实验记录 §28）。
+
 **残余失败结构**：54 集 env 失败中 **40 集是两个冻结任务**（StackCups 30 + PutKnife 10）；
 其余 **14 集全部是单点长尾**（每类 ≤3 集）：PlaceCups "释放后杯柄未挂上辐条" 3、
 MeatOffGrill "释放点偏高被弹离传感器" 3、EmptyContainer 2（1 planner 超时、1 扫描抓取全空）、

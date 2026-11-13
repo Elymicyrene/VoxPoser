@@ -2551,7 +2551,7 @@ class LMP_interface():
           print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] lift-only[{_tag}] raised: {_lfe}{bcolors.ENDC}')
           return False
 
-      def _place_at_sensor(_tag=''):
+      def _place_at_sensor(_tag='', _dz=0.0, _allow_retry=True):
         """把**已握持**的物体送到 success 传感器正上方并释放。
 
         动机（2026-10-25 MeatOffGrill）：计划常常自己先把肉抓住
@@ -2594,10 +2594,12 @@ class LMP_interface():
           try:
             _wsmin = np.asarray(self._env.workspace_bounds_min, dtype=float).reshape(3)
             _wsmax = np.asarray(self._env.workspace_bounds_max, dtype=float).reshape(3)
-            _tgt = np.clip(np.array([_sp[0], _sp[1], float(_sp[2]) + _half + 0.04 - _rel]),
+            _tgt = np.clip(np.array([_sp[0], _sp[1],
+                                     float(_sp[2]) + _half + 0.04 + float(_dz) - _rel]),
                            _wsmin, _wsmax)
           except Exception:
-            _tgt = np.array([_sp[0], _sp[1], float(_sp[2]) + _half + 0.04 - _rel])
+            _tgt = np.array([_sp[0], _sp[1],
+                             float(_sp[2]) + _half + 0.04 + float(_dz) - _rel])
           _ok, _err, _it = self._env.move_ee_closed_loop(_tgt, tol=0.008, max_iters=120)
           self._env.stabilize(steps=10)
           print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}]: '
@@ -2638,6 +2640,28 @@ class LMP_interface():
             _ep_ok = False
           print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}]: '
                 f'released; native success={_ep_ok}{bcolors.ENDC}')
+          # 首次释放未满足原生条件 → 重抓后再放一次（EE 目标降低 25mm）。
+          # 依据 2026-11-13 全量批 10 集日志：首次释放 EE=1.117~1.125 只成功 1/10，
+          # 而重抓后的第二次释放 EE≈1.093 成功 5/7；失败样本 r5 显示肉在搬运中
+          # 仍贴在烤架上（浅抓，`get_grasped_objects()` 为空），需要先重新抓牢。
+          if (not _ep_ok) and _allow_retry:
+            try:
+              _instr_l2 = str(getattr(self._env, 'current_instruction', '') or '').lower()
+              _nm2 = next((_c for _c in ('chicken', 'steak') if _c in _instr_l2), None)
+              _o2, _tz2 = (self._env.get_object_pos_by_name(_nm2) if _nm2
+                           else (None, None))
+              if _o2 is not None:
+                print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}]: '
+                      f'first release missed → re-grasp "{_nm2}" and place 25mm lower{bcolors.ENDC}')
+                _g2ok, _g2cnt = self._env.grasp_with_retry(
+                    max_retry=2, target_pos=_o2, top_z=_tz2)
+                print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}]: '
+                      f're-grasp ok={_g2ok} cnt={_g2cnt}{bcolors.ENDC}')
+                if _g2ok:
+                  _ep_ok = bool(_place_at_sensor(_tag + '-retry', -0.025, False))
+            except Exception as _rte:
+              print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}] '
+                    f'retry raised: {_rte}{bcolors.ENDC}')
           return _ep_ok
         except Exception as _pe:
           print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] place-at-sensor[{_tag}] '

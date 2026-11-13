@@ -116,6 +116,12 @@ Latest full run: `real10_full_20261112` (COMPENSATION ON, output on `D:\综述�
 | StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 (frozen) |
 | PutKnifeInKnifeBlock | 0 | 0/10 (frozen) |
 
+**Post-baseline fix (2026-11-13, meat re-place retry):** `MeatOffGrill` went **7/10 → 18/20 across two
+targeted 10-run batches** (planner 20/20) after `_place_at_sensor` gained a "if the native condition is
+still false after release, re-grasp the named meat and place it 25 mm lower (once)" retry. The two
+remaining failures are blocked by the sensor target being unreachable (184–377 mm IK residual), not by
+the release height. See experiment record §28.
+
 **Post-baseline fix (2026-10-24, grasp chain):** `PickAndLift` went **0/10 → 9/10** under the
 same strict criteria (10/10 planner) after four targeted fixes — see "Grasp-chain fixes" below.
 
