@@ -4047,6 +4047,26 @@ class LMP_interface():
                 _at = np.array([_start[0], _start[1], _z_push], dtype=float)
                 _o1, _r1, _i1 = _move(_above, tol=0.012, max_iters=90)
                 if (not _o1) and _r1 > 0.06:
+                  # 2026-11-16：远端方块（计划把 EE 送去 sensor 而不是方块时，方块
+                  # 常在 150~440mm 外）用逐步 IK 走不过去 —— 日志里每一步的解都被
+                  # "关节跳变和 7.3~9.0 rad > 6.0 rad"预检拒掉（跨分支解），闭环只能
+                  # 原地空转。此处改用 RLBench 的 OMPL 在**关节空间**做一次整体换构型
+                  # （路径连续、不受逐步 IK 分支翻转限制），到位后再用闭环精修。
+                  try:
+                    _qa = np.asarray(self._env.get_home_ee_quat(), dtype=float).reshape(4)
+                    self._env.apply_action(np.concatenate([_above, _qa, [1.0]]))
+                    self._env.stabilize(steps=10)
+                    _eea = np.asarray(self._env.get_ee_pos(), dtype=float).reshape(3)
+                    print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                          f'OMPL 换构型 → ee=({_eea[0]:.3f},{_eea[1]:.3f},{_eea[2]:.3f}) '
+                          f'dist={float(np.linalg.norm(_eea - _above))*1000:.1f}mm{bcolors.ENDC}')
+                  except Exception as _pae:
+                    print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                          f'OMPL 换构型失败: {_pae}{bcolors.ENDC}')
+                  _o1, _r1, _i1 = _move(_above, tol=0.012, max_iters=60)
+                  print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                        f'OMPL 后闭环 ok={_o1} err={_r1*1000:.1f}mm{bcolors.ENDC}')
+                if (not _o1) and _r1 > 0.06:
                   # 远端方块（实测 >250mm 时命中率骤降）：先退到工作空间上方
                   # 中转一次，给 IK 一个不拉伸的中间构型，再重新逼近。
                   try:

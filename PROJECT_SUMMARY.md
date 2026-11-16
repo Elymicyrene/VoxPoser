@@ -1,7 +1,7 @@
 # 基于 VoxPoser 的机器人操作实验进展总结
 
 > 汇报人：本人
-> 更新时间：2026-11-13
+> 更新时间：2026-11-16
 > 代码仓库：https://github.com/Elymicyrene/VoxPoser
 
 ---
@@ -39,11 +39,11 @@
 **随机初始化**、不锁定随机种子、**RLBench 原生 `env.success()` 判据、不做任何成功判据修改**，
 每个变体使用全新环境实例独立运行 **10 次**（共 220 个 episode）。
 
-| 测试项 | 2026-10-23 基线 | 2026-11-03 | 2026-11-12 | **2026-11-13（当前）** |
-|---|---|---|---|---|
-| `planner_success` | 87.3%（192/220） | 91.8%（202/220） | 92.7%（204/220） | **91.4%（201/220）** |
-| `env_success`（整体） | 35.5%（78/220） | 72.3%（159/220） | 73.6%（162/220） | **75.5%（166/220）** |
-| `env_success`（排除两个任务级不可达任务，180 集） | — | — | 90.0%（162/180） | **92.2%（166/180）** |
+| 测试项 | 2026-10-23 基线 | 2026-11-03 | 2026-11-12 | 2026-11-13 | **2026-11-14（当前）** |
+|---|---|---|---|---|---|
+| `planner_success` | 87.3%（192/220） | 91.8%（202/220） | 92.7%（204/220） | 91.4%（201/220） | **91.8%（202/220）** |
+| `env_success`（整体） | 35.5%（78/220） | 72.3%（159/220） | 73.6%（162/220） | 75.5%（166/220） | **75.5%（166/220）** |
+| `env_success`（排除两个任务级不可达任务，180 集） | — | — | 90.0%（162/180） | 92.2%（166/180） | **92.2%（166/180）** |
 
 > **关于早期"100%"数字的更正**：早期汇总中曾出现"22/22 = 100%"，其一部分来自
 > "把物体直接传送到成功接近传感器"或"把末端标记物传送到目标位姿即宣告成功"的人工兜底。
@@ -53,25 +53,25 @@
 **任务级冻结**：`StackCups`（0/30）与 `PutKnifeInKnifeBlock`（0/10）的成功探测器位于
 实心碰撞体/叠放几何内部，不通穿透实体就无法触发，属任务级物理不可达，已冻结（见实验记录 §9/§11）。
 
-**逐任务 env_success（10 次/变体，2026-11-13）：**
+**逐任务 env_success（10 次/变体，2026-11-14）：**
 
 | 任务 | 变体 | env_success |
 |---|---|---|
 | PushButton | var0 / var1 | 10/10 · 10/10 |
-| LampOff | var0 / var1 | 10/10 · 10/10 |
+| LampOff | var0 / var1 | 9/10 · 10/10 |
 | PressSwitch | var0 / var1 | 10/10 · 10/10 |
-| PutRubbishInBin | var0 | 10/10 |
+| PutRubbishInBin | var0 | 9/10 |
 | TakeLidOffSaucepan | var0 | 10/10 |
 | StackBlocks | var0 | 10/10 |
 | PickAndLift | var0 | 10/10 |
-| MeatOffGrill | var0 | 7/10 |
-| PlaceShapeInShapeSorter | var0 | 9/10 |
-| ReachTarget | var0 | 9/10 |
-| BlockPyramid | var0 | 9/10 |
-| SlideBlockToTarget | var0 | 9/10 |
-| TakeUmbrellaOutOfUmbrellaStand | var0 | 8/10 |
+| MeatOffGrill | var0 | 9/10 |
+| PlaceShapeInShapeSorter | var0 | 10/10 |
+| ReachTarget | var0 | 10/10 |
+| TakeUmbrellaOutOfUmbrellaStand | var0 | 10/10 |
+| PlaceCups | var0 | 9/10 |
+| SlideBlockToTarget | var0 | 4/10（11-16 定向修复后 10/10，见实验记录 §30） |
 | EmptyContainer | var0 | 8/10 |
-| PlaceCups | var0 | 7/10 |
+| BlockPyramid | var0 | 8/10 |
 | StackCups | var0 / var1 / var2 | 0/10 · 0/10 · 0/10（冻结） |
 | PutKnifeInKnifeBlock | var0 | 0/10（冻结） |
 
@@ -80,11 +80,16 @@
 降低 25mm 再放一次"的重试后，两批各 10 集合计 **18/20（planner 20/20）**；
 剩余 2 集失败是传感器目标不可达（IK 残差 184~377mm），与释放高度无关（实验记录 §28）。
 
+**定向修复（2026-11-16，SlideBlockToTarget）**：11-14 全量批掉到 4/10 的根因是计划目标取向——
+LLM 有时把 waypoint 送到**传感器**而非**方块**，EE 停住时方块还在 150~440mm 外，
+逐步 IK 每一步都被"关节跳变和 >6 rad"预检拒掉。改为在该情形下先用 RLBench **OMPL 在关节空间整体
+换构型**到方块后上方，再闭环精修后推块。两批各 10 集合计 **19/20（planner 20/20）**；
+唯一失败是计划把机械臂压到台面、把方块扫到地上（不可恢复），见实验记录 §30。
+
 **残余失败结构**：54 集 env 失败中 **40 集是两个冻结任务**（StackCups 30 + PutKnife 10）；
-其余 **14 集全部是单点长尾**（每类 ≤3 集）：PlaceCups "释放后杯柄未挂上辐条" 3、
-MeatOffGrill "释放点偏高被弹离传感器" 3、EmptyContainer 2（1 planner 超时、1 扫描抓取全空）、
-TakeUmbrella 2，以及 SlideBlock / ReachTarget / PlaceShape（初始化 V-REP −1 重跑仍失败）/
-BlockPyramid 各 1。非冻结任务的 `planner_success` 为 **178/180（98.9%）**。详细归因见实验记录 §27。
+其余 **14 集全部是单点长尾**：SlideBlock 6（11-16 已修）、BlockPyramid 2（1 初始化 V-REP −1、1 planner 超时）、
+EmptyContainer 2（1 planner 超时、1 抓取/放置长尾），以及 LampOff / MeatOffGrill / PlaceCups /
+PutRubbishInBin 各 1。非冻结任务的 `planner_success` 为 **176/180（97.8%）**。详细归因见实验记录 §29。
 
 ---
 
