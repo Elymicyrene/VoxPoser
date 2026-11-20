@@ -3952,6 +3952,7 @@ class LMP_interface():
               _STOP_MARGIN = 0.036      # 推进到距传感器 36mm 收手（环带 22~38mm 中心）
               _RING_IN = 0.022
               _dead_escaped = 0
+              _creep_done = False
               for _try in range(6):
                 if time.time() - _t_slide > _SLIDE_BUDGET_S:
                   print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3: '
@@ -4119,6 +4120,38 @@ class LMP_interface():
                         f'原生成功条件已满足 — stop pushing{bcolors.ENDC}')
                   break
                 if _moved < 0.004:
+                  # 2026-11-21：push 的 stop_when 在"距传感器 ≤36mm"（预停线）就停，
+                  # 但 11-16/20 全量批 r7 实测方块停在 36.0mm 时原生条件仍为 False
+                  # （多次推动后方块轻微倾斜/转向，有效检出带比几何环带更窄）。
+                  # 此时做一次 ≤8mm 的"贴线微推"，只以原生条件为停止判据；若方块
+                  # 已滑进死区（<28mm）则不做，交由下一轮逃逸分支处理。
+                  if (not (_cmet and all(_cmet))) and (not _creep_done) \
+                     and (_RING_IN + 0.006) <= _dist_new <= (_STOP_MARGIN + 0.008):
+                    _creep_done = True
+                    _dv2 = np.asarray(_sen_xy, dtype=float).reshape(2) - _blk[:2]
+                    _dist2 = float(np.linalg.norm(_dv2))
+                    _u2 = _dv2 / max(_dist2, 1e-9)
+                    _push_tgt2 = _blk[:2] + _u2 * 0.010
+                    print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                          f'预停线未检出（dist={_dist_new*1000:.1f}mm）→ 贴线微推 8mm{bcolors.ENDC}')
+                    self._env.horizontal_push_continuous(
+                        target_xy=_push_tgt2, total_steps=8,
+                        gripper_action=0.0, clamp_z=_z_push,
+                        budget_s=10.0, stop_when=_cond_all, settle_steps=6)
+                    _bc3, _btz3 = _read_block()
+                    if _bc3 is not None:
+                      _blk = np.asarray(_bc3, dtype=float).reshape(3)
+                      if _btz3 is not None:
+                        _blk_top = float(_btz3)
+                      _dist_new = float(np.linalg.norm(
+                          np.asarray(_sen_xy, dtype=float).reshape(2) - _blk[:2]))
+                      _cmet = _conds_met_now()
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                            f'微推后 dist={_dist_new*1000:.1f}mm conds={_cmet}{bcolors.ENDC}')
+                    if _cmet and all(_cmet):
+                      print(f'{bcolors.OKBLUE}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
+                            f'微推后原生成功条件已满足 — stop pushing{bcolors.ENDC}')
+                      break
                   print(f'{bcolors.WARNING}[interfaces.py | {get_clock_time()}] Fix3 push#{_try+1}: '
                         f'方块几乎未被推动 — 停止（避免空转到预算耗尽）{bcolors.ENDC}')
                   break

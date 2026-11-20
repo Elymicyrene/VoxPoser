@@ -126,6 +126,13 @@ recovered **7/10** (was 4/10); the three remaining failures are three *different
 (near the workspace boundary / block got stuck 36 mm outside the detection ring / approach-behind
 residual 26 mm), no longer the step-wise-IK signature. See experiment record §30–§31.
 
+**Post-baseline fix (2026-11-21, pre-stop creep push):** the 36 mm pre-stop line can terminate a push
+while the block is still outside the effective detection band (measured 35.9 mm, native condition
+false, block displacement 0 mm). When that signature occurs, one bounded 8 mm creep push toward the
+sensor is now attempted with the native condition as the only stop criterion (plus no teleport, no
+criteria change). Validated **10/10 + 10/10 env (planner 20/20)** in two 10-run batches, with the
+creep firing once and converting 35.9 mm → 30.4 mm → condition met. See experiment record §33.
+
 **Post-baseline fix (2026-11-13, meat re-place retry):** `MeatOffGrill` went **7/10 → 18/20 across two
 targeted 10-run batches** (planner 20/20) after `_place_at_sensor` gained a "if the native condition is
 still false after release, re-grasp the named meat and place it 25 mm lower (once)" retry. The two
