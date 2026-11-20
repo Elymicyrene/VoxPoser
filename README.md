@@ -72,17 +72,17 @@ cd ../experiment_results
 python run_real10.py
 ```
 
-### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-14)
+### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-16/20)
 
 Evaluation uses **genuine random initialization** (no fixed seed), **RLBench's native
 `env.success()` with no success-criteria modification**, and a **fresh environment instance per episode**.
-Latest full run: `real10_full_20261114` (COMPENSATION ON, output on `D:\综述论文研读_实验数据\`).
+Latest full run: `real10_full_20261116` (COMPENSATION ON, output on `D:\综述论文研读_实验数据\`).
 
-| Metric | 2026-10-23 baseline | 2026-11-03 | 2026-11-12 | 2026-11-13 | **2026-11-14 (current)** |
-|---|---|---|---|---|---|
-| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | 92.7% (204/220) | 91.4% (201/220) | **91.8% (202/220)** |
-| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | 73.6% (162/220) | 75.5% (166/220) | **75.5% (166/220)** |
-| `env_success` excluding the two frozen tasks (180 episodes) | — | — | 90.0% (162/180) | 92.2% (166/180) | **92.2% (166/180)** |
+| Metric | 2026-10-23 baseline | 2026-11-03 | 2026-11-12 | 2026-11-13 | 2026-11-14 | **2026-11-16/20 (current)** |
+|---|---|---|---|---|---|---|
+| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | 92.7% (204/220) | 91.4% (201/220) | 91.8% (202/220) | **92.7% (204/220)** |
+| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | 73.6% (162/220) | 75.5% (166/220) | 75.5% (166/220) | **76.8% (169/220)** |
+| `env_success` excluding the two frozen tasks (180 episodes) | — | — | 90.0% (162/180) | 92.2% (166/180) | 92.2% (166/180) | **93.9% (169/180)** |
 
 > Frozen as task-level physically unreachable: `StackCups` (0/30) and
 > `PutKnifeInKnifeBlock` (0/10) — their success detector sits inside the solid collision
@@ -94,36 +94,37 @@ Latest full run: `real10_full_20261114` (COMPENSATION ON, output on `D:\综述�
 > onto the target pose and declaring success). Those fallbacks modified the success
 > criteria and have been removed. The table above is the strict, fallback-free result.
 
-**Per-task `env_success` (10 runs per variant, 2026-11-14):**
+**Per-task `env_success` (10 runs per variant, 2026-11-16/20):**
 
 | Task | Var | Env |
 |---|---|---|
 | PushButton | 0 / 1 | 10/10 · 10/10 |
-| LampOff | 0 / 1 | 9/10 · 10/10 |
+| LampOff | 0 / 1 | 10/10 · 10/10 |
 | PressSwitch | 0 / 1 | 10/10 · 10/10 |
-| PutRubbishInBin | 0 | 9/10 |
+| PutRubbishInBin | 0 | 10/10 |
 | TakeLidOffSaucepan | 0 | 10/10 |
 | StackBlocks | 0 | 10/10 |
 | PickAndLift | 0 | 10/10 |
-| MeatOffGrill | 0 | 9/10 |
-| PlaceShapeInShapeSorter | 0 | 10/10 |
-| ReachTarget | 0 | 10/10 |
-| TakeUmbrellaOutOfUmbrellaStand | 0 | 10/10 |
-| PlaceCups | 0 | 9/10 |
-| SlideBlockToTarget | 0 | 4/10（见下方 11-16 定向修复） |
-| EmptyContainer | 0 | 8/10 |
+| MeatOffGrill | 0 | 10/10 |
+| PlaceShapeInShapeSorter | 0 | 9/10 |
+| ReachTarget | 0 | 7/10 |
+| TakeUmbrellaOutOfUmbrellaStand | 0 | 9/10 |
+| PlaceCups | 0 | 10/10 |
+| SlideBlockToTarget | 0 | 7/10（11-16 OMPL 修复后，见下） |
+| EmptyContainer | 0 | 9/10 |
 | BlockPyramid | 0 | 8/10 |
 | StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 (frozen) |
 | PutKnifeInKnifeBlock | 0 | 0/10 (frozen) |
 
-**Post-baseline fix (2026-11-16, slide far-block reconfiguration):** `SlideBlockToTarget` dropped to
+**Post-baseline fix (2026-11-16, slide far-block reconfiguration):** `SlideBlockToTarget` had dropped to
 **4/10** in the 11-14 full run because the LLM plan sometimes targets the *sensor* instead of the
 *block*, leaving the EE 150–440 mm away from the block; the step-wise IK loop then rejects every step
 (`Chain A jump 7.3–9.0 rad > 6.0`) and cannot approach. Fix: when the closed-loop approach fails with
 >60 mm residual, first let RLBench's **OMPL** re-configure the arm in joint space (`apply_action` to the
-approach pose with the home orientation), then refine with the closed loop. Validated **19/20 env,
-20/20 planner across two 10-run batches** (one failure: the plan pushed the arm down through the table
-and swept the block onto the floor). See experiment record §30.
+approach pose with the home orientation), then refine with the closed loop. In the 11-16/20 full run it
+recovered **7/10** (was 4/10); the three remaining failures are three *different* edge long tails
+(near the workspace boundary / block got stuck 36 mm outside the detection ring / approach-behind
+residual 26 mm), no longer the step-wise-IK signature. See experiment record §30–§31.
 
 **Post-baseline fix (2026-11-13, meat re-place retry):** `MeatOffGrill` went **7/10 → 18/20 across two
 targeted 10-run batches** (planner 20/20) after `_place_at_sensor` gained a "if the native condition is
@@ -144,13 +145,12 @@ that sample. Cross-task regression (PlaceCups ×3, PickAndLift ×2) passed **5/5
 the retry never triggered. An IK-interpolation variant (slerp + step halving) was measured and reverted
 (env 8/10; IK-step advance 0.115 → 0.045 m) — see project summary §4.12.
 
-**Current bottleneck (2026-11-14):** of the 54 remaining `env_success` failures, **40 are the two
+**Current bottleneck (2026-11-16/20):** of the 51 remaining `env_success` failures, **40 are the two
 frozen tasks** (StackCups 30 + PutKnifeInKnifeBlock 10, physically unreachable detectors).
-The other **14 are single-point long tails**: SlideBlockToTarget 6 (plan targets the sensor instead of
-the block — fixed on 11-16, §30), BlockPyramid 2 (1 init V-REP −1 after retries, 1 planner timeout),
-EmptyContainer 2 (1 planner timeout, 1 grasp/place miss), and one each in LampOff (joint displacement
-0.003089 vs 0.003 threshold) / MeatOffGrill / PlaceCups / PutRubbishInBin.
-`planner_success` outside the frozen tasks is **176/180 (97.8%)**.
+The other **11 are single-point long tails**: SlideBlockToTarget 3 (three different edge cases after the
+OMPL fix), ReachTarget 3 (random init sampled targets at z=1.532 m that the arm cannot reach),
+BlockPyramid 2 (final placement), and one each in EmptyContainer / TakeUmbrella / PlaceShape.
+`planner_success` outside the frozen tasks is **180/180 (100%)**.
 
 ### Slide-block push control (2026-10-24)
 
