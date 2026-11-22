@@ -72,17 +72,17 @@ cd ../experiment_results
 python run_real10.py
 ```
 
-### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-16/20)
+### Latest Benchmark Result (strict, 22 × 10 = 220 episodes, 2026-11-21/22)
 
 Evaluation uses **genuine random initialization** (no fixed seed), **RLBench's native
 `env.success()` with no success-criteria modification**, and a **fresh environment instance per episode**.
-Latest full run: `real10_full_20261116` (COMPENSATION ON, output on `D:\综述论文研读_实验数据\`).
+Latest full run: `real10_full_20261121` (COMPENSATION ON, output on `D:\综述论文研读_实验数据\`).
 
-| Metric | 2026-10-23 baseline | 2026-11-03 | 2026-11-12 | 2026-11-13 | 2026-11-14 | **2026-11-16/20 (current)** |
-|---|---|---|---|---|---|---|
-| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | 92.7% (204/220) | 91.4% (201/220) | 91.8% (202/220) | **92.7% (204/220)** |
-| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | 73.6% (162/220) | 75.5% (166/220) | 75.5% (166/220) | **76.8% (169/220)** |
-| `env_success` excluding the two frozen tasks (180 episodes) | — | — | 90.0% (162/180) | 92.2% (166/180) | 92.2% (166/180) | **93.9% (169/180)** |
+| Metric | 2026-10-23 baseline | 2026-11-03 | 2026-11-12 | 2026-11-13 | 2026-11-14 | 2026-11-16/20 | **2026-11-21/22 (current)** |
+|---|---|---|---|---|---|---|---|
+| `planner_success` | 87.3% (192/220) | 91.8% (202/220) | 92.7% (204/220) | 91.4% (201/220) | 91.8% (202/220) | 92.7% (204/220) | **90.0% (198/220)** |
+| `env_success` (overall) | 35.5% (78/220) | 72.3% (159/220) | 73.6% (162/220) | 75.5% (166/220) | 75.5% (166/220) | 76.8% (169/220) | **75.9% (167/220)** |
+| `env_success` excluding the two frozen tasks (180 episodes) | — | — | 90.0% (162/180) | 92.2% (166/180) | 92.2% (166/180) | 93.9% (169/180) | **92.8% (167/180)** |
 
 > Frozen as task-level physically unreachable: `StackCups` (0/30) and
 > `PutKnifeInKnifeBlock` (0/10) — their success detector sits inside the solid collision
@@ -94,7 +94,7 @@ Latest full run: `real10_full_20261116` (COMPENSATION ON, output on `D:\综述�
 > onto the target pose and declaring success). Those fallbacks modified the success
 > criteria and have been removed. The table above is the strict, fallback-free result.
 
-**Per-task `env_success` (10 runs per variant, 2026-11-16/20):**
+**Per-task `env_success` (10 runs per variant, 2026-11-21/22):**
 
 | Task | Var | Env |
 |---|---|---|
@@ -105,13 +105,13 @@ Latest full run: `real10_full_20261116` (COMPENSATION ON, output on `D:\综述�
 | TakeLidOffSaucepan | 0 | 10/10 |
 | StackBlocks | 0 | 10/10 |
 | PickAndLift | 0 | 10/10 |
-| MeatOffGrill | 0 | 10/10 |
+| ReachTarget | 0 | 10/10 |
+| MeatOffGrill | 0 | 9/10 |
 | PlaceShapeInShapeSorter | 0 | 9/10 |
-| ReachTarget | 0 | 7/10 |
-| TakeUmbrellaOutOfUmbrellaStand | 0 | 9/10 |
-| PlaceCups | 0 | 10/10 |
-| SlideBlockToTarget | 0 | 7/10（11-16 OMPL 修复后，见下） |
-| EmptyContainer | 0 | 9/10 |
+| TakeUmbrellaOutOfUmbrellaStand | 0 | 8/10 |
+| PlaceCups | 0 | 8/10 |
+| SlideBlockToTarget | 0 | 8/10 |
+| EmptyContainer | 0 | 7/10 |
 | BlockPyramid | 0 | 8/10 |
 | StackCups | 0 / 1 / 2 | 0/10 · 0/10 · 0/10 (frozen) |
 | PutKnifeInKnifeBlock | 0 | 0/10 (frozen) |
@@ -121,10 +121,10 @@ Latest full run: `real10_full_20261116` (COMPENSATION ON, output on `D:\综述�
 *block*, leaving the EE 150–440 mm away from the block; the step-wise IK loop then rejects every step
 (`Chain A jump 7.3–9.0 rad > 6.0`) and cannot approach. Fix: when the closed-loop approach fails with
 >60 mm residual, first let RLBench's **OMPL** re-configure the arm in joint space (`apply_action` to the
-approach pose with the home orientation), then refine with the closed loop. In the 11-16/20 full run it
-recovered **7/10** (was 4/10); the three remaining failures are three *different* edge long tails
-(near the workspace boundary / block got stuck 36 mm outside the detection ring / approach-behind
-residual 26 mm), no longer the step-wise-IK signature. See experiment record §30–§31.
+approach pose with the home orientation), then refine with the closed loop. It recovered **7/10** in the
+11-16/20 full run (was 4/10) and **8/10** in 11-21/22; the remaining failures are edge long tails
+(near the workspace boundary / block got stuck outside the detection ring / approach-behind residual),
+no longer the step-wise-IK signature. See experiment record §30–§31, §34.
 
 **Post-baseline fix (2026-11-21, pre-stop creep push):** the 36 mm pre-stop line can terminate a push
 while the block is still outside the effective detection band (measured 35.9 mm, native condition
@@ -152,12 +152,15 @@ that sample. Cross-task regression (PlaceCups ×3, PickAndLift ×2) passed **5/5
 the retry never triggered. An IK-interpolation variant (slerp + step halving) was measured and reverted
 (env 8/10; IK-step advance 0.115 → 0.045 m) — see project summary §4.12.
 
-**Current bottleneck (2026-11-16/20):** of the 51 remaining `env_success` failures, **40 are the two
+**Current bottleneck (2026-11-21/22):** of the 53 remaining `env_success` failures, **40 are the two
 frozen tasks** (StackCups 30 + PutKnifeInKnifeBlock 10, physically unreachable detectors).
-The other **11 are single-point long tails**: SlideBlockToTarget 3 (three different edge cases after the
-OMPL fix), ReachTarget 3 (random init sampled targets at z=1.532 m that the arm cannot reach),
-BlockPyramid 2 (final placement), and one each in EmptyContainer / TakeUmbrella / PlaceShape.
-`planner_success` outside the frozen tasks is **180/180 (100%)**.
+The other **13 are long tails**: grasp misses 4 (PlaceCups 1, EmptyContainer 2, Meat 1),
+placement 2 (PlaceCups 1, BlockPyramid 1), planner-semantic 2 (TakeUmbrella: press-mode only, never
+grasps), workspace-boundary control 2 (SlideBlock, block at the workspace edge), task-reset failures 2
+(PlaceShape 1, BlockPyramid 1 — V-REP −1 after retries, counted as genuine failures), watchdog 1
+(EmptyContainer). `planner_success` outside the frozen tasks is **177/180 (98.3%)**.
+Two independent full runs on the same code (11-16 = 169/220, 11-21 = 167/220) put the strict baseline
+at **168 ± 1 / 220 (76.4%)**.
 
 ### Slide-block push control (2026-10-24)
 
