@@ -2667,6 +2667,90 @@ class VoxPoserRLBench():
         _cnt_hits = [h[3] for h in _hits if h[3] > 0]
         return (len(_cnt_hits) > 0), (max(_cnt_hits) if _cnt_hits else 0), _hits
 
+    def reconfigure_to_pose(self, target_pos, target_quat=None,
+                            max_configs=4, settle_steps=30):
+        """用采样 IK 换一个构型到目标位姿（纯关节指令，无传送）。
+
+        动机（2026-11-24 复盘 11-21 全量批）：
+          · EmptyContainer r6：容器内物体下降残差 26~28mm，局部 Jacobian 闭环
+            在原地打转，但 solve_ik_via_sampling 在同一目标点能给出合法构型；
+          · PlaceCups r1：第三个杯子的接近/下降残差 75~110mm，臂已处在坏分支上；
+          · Meat r6：二次抓取后搬运到传感器残差 295mm。
+        三者的共同点不是"抓取高度不对"，而是**当前关节分支到不了目标**。本方法
+        只在常规闭环失败后被调用，用采样 IK 给出的构型做关节空间斜坡切换，再让
+        上层继续闭环/闭爪。全程不修改判据、不传送物体；失败时无副作用。
+
+        :return: (是否到达, 最终 EE 到目标的位置误差 m)
+        """
+        try:
+            scene = self.rlbench_env._scene
+            arm = scene.robot.arm
+            tip = arm.get_tip()
+            action_mode = getattr(self.rlbench_env, '_action_mode', None)
+        except Exception as _e:
+            print('[rlbench_env.py] reconfigure_to_pose: env access err %s' % _e)
+            return False, float('inf')
+        tgt = np.asarray(target_pos, dtype=float).reshape(3)
+        if not self._pos_is_sane(tgt):
+            print('[rlbench_env.py] reconfigure_to_pose: reject non-sane target %s' % (tgt,))
+            return False, float('inf')
+        # 距离守卫：只做"近目标换分支"（≤150mm）。远距离构型切换会让 EE 在
+        # 关节空间里长距离扫过场景，可能撞飞目标物体；远距离仍交给原兜底链。
+        try:
+            _ee_now = np.asarray(tip.get_position(), dtype=float).reshape(3)
+            _d0 = float(np.linalg.norm(_ee_now - tgt))
+            if _d0 > 0.15:
+                print('[rlbench_env.py] reconfigure_to_pose: target %.0fmm away (>150mm) — skip'
+                      % (_d0 * 1000))
+                return False, _d0
+        except Exception:
+            pass
+        if target_quat is None:
+            try:
+                _q = np.asarray(tip.get_quaternion(), dtype=float).reshape(4)  # xyzw
+                quat_wxyz = np.array([_q[3], _q[0], _q[1], _q[2]], dtype=float)
+            except Exception:
+                quat_wxyz = np.asarray(self.get_home_ee_quat(), dtype=float).reshape(4)
+        else:
+            quat_wxyz = np.asarray(target_quat, dtype=float).reshape(4)
+        quat_xyzw = [float(quat_wxyz[1]), float(quat_wxyz[2]),
+                     float(quat_wxyz[3]), float(quat_wxyz[0])]
+        try:
+            cfgs = arm.solve_ik_via_sampling(
+                tgt.tolist(), quaternion=quat_xyzw,
+                ignore_collisions=True, max_configs=int(max_configs))
+            cfgs = np.asarray(cfgs, dtype=float)
+            if cfgs.ndim == 1:
+                cfgs = cfgs.reshape(1, -1)
+        except Exception as _ie:
+            print('[rlbench_env.py] reconfigure_to_pose: no IK config (%s)' % _ie)
+            return False, float('inf')
+        best_err = float('inf')
+        for _ci, _cfg in enumerate(cfgs):
+            try:
+                _applied = action_mode._set_joints_smooth(
+                    scene, arm, list(_cfg), settle_steps=int(settle_steps),
+                    max_delta=0.2, reject_delta=2.5) if action_mode is not None else False
+            except Exception:
+                _applied = False
+            if not _applied:
+                continue
+            try:
+                _ee = np.asarray(tip.get_position(), dtype=float).reshape(3)
+                _err = float(np.linalg.norm(_ee - tgt))
+            except Exception:
+                _err = float('inf')
+            best_err = min(best_err, _err)
+            if _err <= 0.008:
+                self._refresh_obs()
+                print('[rlbench_env.py] reconfigure_to_pose: ok err=%.1fmm (config %d/%d)'
+                      % (_err * 1000, _ci + 1, len(cfgs)))
+                return True, _err
+        self._refresh_obs()
+        print('[rlbench_env.py] reconfigure_to_pose: best err=%.1fmm (configs=%d)'
+              % ((best_err * 1000) if np.isfinite(best_err) else -1.0, len(cfgs)))
+        return False, best_err
+
     def grasp_with_retry(self, max_retry=3, stabilize_steps=25, push_down_m=0.015,
                          target_pos=None, top_z=None):
         """
@@ -2723,11 +2807,28 @@ class VoxPoserRLBench():
                 print('[rlbench_env.py] grasp_with_retry: XY-align failed: %s' % _ae)
         # 远未对准（XY 残差 > 30mm）说明夹爪离物体很远：此时继续下压/扫描只会在
         # 不可达目标上空转，并可能把目标撞离台面/引发物理爆炸（实测 cup 被撞到
-        # 台面外）。直接放弃本次抓取，成功判定仍交给原生机制。
+        # 台面外）。先尝试一次采样 IK 换构型（2026-11-24），仍到不了才放弃；
+        # 成功判定仍交给原生机制。
         if (not _al_ok) and _al_err > 0.03:
-            print('[rlbench_env.py] grasp_with_retry: XY-align far off (%.1fmm > 30mm) — abort grasp to avoid disturbing scene' % (_al_err * 1000))
-            return False, 0
+            _rc_ok = False
+            if target_pos is not None:
+                try:
+                    _tp_r = np.asarray(target_pos, dtype=float).reshape(3)
+                    _rc_z = ((float(top_z) - 0.003) if top_z is not None
+                             else float(np.asarray(self.get_ee_pos(), dtype=float).reshape(3)[2]))
+                    _rc_ok, _rc_err = self.reconfigure_to_pose(
+                        np.array([_tp_r[0], _tp_r[1], _rc_z], dtype=float),
+                        target_quat=self.get_home_ee_quat())
+                    print('[rlbench_env.py] grasp_with_retry: far-off reconfigure ok=%s err=%.1fmm'
+                          % (_rc_ok, (_rc_err * 1000) if np.isfinite(_rc_err) else -1.0))
+                except Exception as _rce:
+                    print('[rlbench_env.py] grasp_with_retry: far-off reconfigure err %s' % _rce)
+            if not _rc_ok:
+                print('[rlbench_env.py] grasp_with_retry: XY-align far off (%.1fmm > 30mm) — abort grasp to avoid disturbing scene' % (_al_err * 1000))
+                return False, 0
+            _al_ok, _al_err = True, 0.0
 
+        _rc_tried = False
         for attempt in range(max_retry):
             if episode_budget_exceeded():
                 print('[rlbench_env.py] grasp_with_retry: episode wall-clock budget exceeded — stop retries')
@@ -2741,6 +2842,29 @@ class VoxPoserRLBench():
                 print('[rlbench_env.py] grasp_with_retry: grasped %d objects on attempt %d' %
                       (cnt, attempt + 1))
                 return True, cnt
+            # 首抓失败且 XY 残差仍 >12mm：局部闭环多半卡在坏分支上。用采样 IK
+            # 换一个构型重新对准后再闭爪一次（仅在失败路径生效）。
+            if (attempt == 0) and (not _rc_tried) and target_pos is not None and float(_al_err) > 0.012:
+                _rc_tried = True
+                try:
+                    _tp_r = np.asarray(target_pos, dtype=float).reshape(3)
+                    _rc_z = ((float(top_z) - 0.003) if top_z is not None
+                             else float(np.asarray(self.get_ee_pos(), dtype=float).reshape(3)[2]))
+                    _rc_ok, _rc_err = self.reconfigure_to_pose(
+                        np.array([_tp_r[0], _tp_r[1], _rc_z], dtype=float),
+                        target_quat=self.get_home_ee_quat())
+                    print('[rlbench_env.py] grasp_with_retry: retry-by-reconfigure ok=%s err=%.1fmm'
+                          % (_rc_ok, (_rc_err * 1000) if np.isfinite(_rc_err) else -1.0))
+                    if _rc_ok or _rc_err <= 0.012:
+                        self._direct_open_gripper()
+                        self._direct_close_gripper(extra_steps=stabilize_steps)
+                        _ok3, cnt3 = _grasp_confirmed()
+                        print('[rlbench_env.py] grasp_with_retry: reconfigured close → grasped=%s cnt=%d'
+                              % (_ok3, cnt3))
+                        if _ok3:
+                            return True, cnt3
+                except Exception as _rce:
+                    print('[rlbench_env.py] grasp_with_retry: retry-by-reconfigure err %s' % _rce)
             if attempt + 1 >= max_retry:
                 break
             # Step 2: 重试 —— 直接开爪 → 闭环 IK 下压 push_down_m → 再直接闭爪
