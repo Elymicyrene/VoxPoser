@@ -19,6 +19,10 @@ from utils import normalize_vector, bcolors
 #   - Debugging compensation side-effects
 _PHYS_COMP_ENABLED = os.environ.get('VOSPOSER_DISABLE_PHYSICS_COMP', '0') != '1'
 
+# reconfigure_to_pose 的距离守卫（米）。默认 0.15：只做近目标换分支，远距离
+# 仍交给原兜底链。定向实验可用 VOSPOSER_RECONF_MAX_DIST_M 调整后验证。
+_RECONF_MAX_DIST_M = float(os.environ.get('VOSPOSER_RECONF_MAX_DIST_M', '0.15'))
+
 # Debug toggle for physics compensation (set env VOSPOSER_DEBUG_PHYSICS=1 to enable)
 _DEBUG_PHYS = os.environ.get('VOSPOSER_DEBUG_PHYSICS', '0') == '1'
 def _phys_dbg(*args, **kwargs):
@@ -2694,14 +2698,15 @@ class VoxPoserRLBench():
         if not self._pos_is_sane(tgt):
             print('[rlbench_env.py] reconfigure_to_pose: reject non-sane target %s' % (tgt,))
             return False, float('inf')
-        # 距离守卫：只做"近目标换分支"（≤150mm）。远距离构型切换会让 EE 在
+        # 距离守卫：只做"近目标换分支"（默认 ≤150mm，可用
+        # VOSPOSER_RECONF_MAX_DIST_M 覆盖）。远距离构型切换会让 EE 在
         # 关节空间里长距离扫过场景，可能撞飞目标物体；远距离仍交给原兜底链。
         try:
             _ee_now = np.asarray(tip.get_position(), dtype=float).reshape(3)
             _d0 = float(np.linalg.norm(_ee_now - tgt))
-            if _d0 > 0.15:
-                print('[rlbench_env.py] reconfigure_to_pose: target %.0fmm away (>150mm) — skip'
-                      % (_d0 * 1000))
+            if _d0 > _RECONF_MAX_DIST_M:
+                print('[rlbench_env.py] reconfigure_to_pose: target %.0fmm away (>%.0fmm) — skip'
+                      % (_d0 * 1000, _RECONF_MAX_DIST_M * 1000))
                 return False, _d0
         except Exception:
             pass
